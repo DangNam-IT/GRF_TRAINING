@@ -1,0 +1,13 @@
+# If you change any of the requirements here please don't forget to change them in setup.py too
+pygame>=1.9.6
+opencv-python
+psutil
+numpy
+gym
+absl-py
+wheel
+torch>=2.0.0
+gfootball>=2.10.2
+scipy>=1.7.0
+pandas>=1.3.0
+matplotlib>=3.4.0

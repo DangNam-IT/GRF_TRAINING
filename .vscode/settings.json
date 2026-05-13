@@ -1,0 +1,9 @@
+{
+    "python.defaultInterpreterPath": "C:/Users/Dang Phuong Nam/.conda/envs/football_env/python.exe",
+    "python.analysis.extraPaths": [
+        ".",
+        "C:/Users/Dang Phuong Nam/.conda/envs/football_env/lib/site-packages"
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
+    "python-envs.defaultPackageManager": "ms-python.python:pip"
+}
