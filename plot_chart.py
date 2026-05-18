@@ -3,53 +3,35 @@ import matplotlib.pyplot as plt
 import os
 
 def plot_learning_curve(csv_path, save_path, title):
-    """
-    Đọc dữ liệu từ CSV và vẽ biểu đồ Learning Curve.
-    """
     if not os.path.exists(csv_path):
-        print(f"Không tìm thấy file dữ liệu: {csv_path}")
+        print(f"File {csv_path} không tồn tại!")
         return
 
-    # Đọc dữ liệu
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, header=None, names=['Episode', 'Reward', 'Loss'])
+    if len(df) == 0: return
+     # In ra tất cả các tên cột để kiểm tra
+    print("Các cột có trong file:", df.columns.tolist()) 
     
-    # Sử dụng moving average để làm mượt biểu đồ (giúp dễ nhìn xu hướng hơn)
-    window_size = max(1, len(df) // 20) 
-    df['Reward_Moving_Avg'] = df['Total_Reward'].rolling(window=window_size).mean()
+    # Xóa khoảng trắng thừa ở tên cột (nếu có)
+    df.columns = df.columns.str.strip()
+    # Cột Y tự động lấy cột thứ 2
+    y_col = df.columns[1]
+    window_size = max(1, len(df) // 20)
+    df['Moving_Avg'] = df[y_col].rolling(window=window_size).mean()
 
-    # Cấu hình biểu đồ
     plt.figure(figsize=(10, 6))
-    
-    # Vẽ reward gốc (màu nhạt)
-    plt.plot(df['Episode'], df['Total_Reward'], alpha=0.3, color='blue', label='Raw Reward')
-    
-    # Vẽ đường trung bình (màu đậm)
-    plt.plot(df['Episode'], df['Reward_Moving_Avg'], color='red', linewidth=2, label=f'Moving Avg (Window={window_size})')
+    plt.plot(df['Episode'], df[y_col], alpha=0.3, color='blue', label='Raw Reward')
+    plt.plot(df['Episode'], df['Moving_Avg'], color='red', linewidth=2, label=f'Moving Avg ({window_size} eps)')
 
     plt.title(title, fontsize=14, fontweight='bold')
     plt.xlabel('Episodes', fontsize=12)
-    plt.ylabel('Total Reward', fontsize=12)
+    plt.ylabel('Reward', fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
-
-    # Lưu biểu đồ thành file ảnh
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
-    print(f"Đã lưu biểu đồ tại: {save_path}")
-    
-    # Hiển thị biểu đồ lên màn hình
-    plt.show()
+    print(f"Lưu biểu đồ thành công: {save_path}")
 
 if __name__ == "__main__":
-    # Đảm bảo thư mục lưu ảnh tồn tại
-    os.makedirs('results', exist_ok=True)
-    
-    # Vẽ biểu đồ cho Phase 1
-    plot_learning_curve(
-        csv_path='results/phase1_training.csv',
-        save_path='results/phase1_learning_curve.png',
-        title='HES-COMA Phase 1: Global Agent Learning Curve'
-    )
-    
-    # Nếu có file Phase 2, bạn có thể gọi thêm:
-    # plot_learning_curve('results/phase2_training.csv', 'results/phase2_learning_curve.png', 'HES-COMA Phase 2: Local Agent')
+    plot_learning_curve('experiments/phase1_training.csv', 'experiments/phase1_chart.png', 'HES-COMA Phase 1: Global Strategic Movement')
+    # plot_learning_curve('experiments/phase2_training.csv', 'experiments/phase2_chart.png', 'HES-COMA Phase 2: Local Tactical Actions')
