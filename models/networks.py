@@ -2,29 +2,35 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class Actor(nn.Module):
+class ActorNetwork(nn.Module):
     def __init__(self, obs_dim, n_actions):
-        super(Actor, self).__init__()
-        self.fc1 = nn.Linear(obs_dim, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.action_head = nn.Linear(128, n_actions)
+        super(ActorNetwork, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, n_actions)
+        )
 
     def forward(self, obs):
-        x = F.relu(self.fc1(obs))
-        x = F.relu(self.fc2(x))
-        probs = F.softmax(self.action_head(x), dim=-1)
-        return probs
+        return F.softmax(self.net(obs), dim=-1)
 
-class CentralizedCritic(nn.Module):
-    def __init__(self, state_dim, n_actions):
-        super(CentralizedCritic, self).__init__()
-        # Critic nhận cả trạng thái toàn cục và hành động (dạng one-hot)
-        self.fc1 = nn.Linear(state_dim + n_actions, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.q_out = nn.Linear(128, 1)
+class CentralCriticNetwork(nn.Module):
+    def __init__(self, state_dim, n_actions, n_agents=11):
+        super(CentralCriticNetwork, self).__init__()
+        # Input bao gồm State toàn cục + Hành động one-hot của tất cả 11 agents
+        self.input_dim = state_dim + (n_actions * n_agents)
+        self.net = nn.Sequential(
+            nn.Linear(self.input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, n_agents) # Xuất Q-value cho mỗi agent
+        )
 
-    def forward(self, state, action_one_hot):
-        x = torch.cat([state, action_one_hot], dim=-1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.q_out(x)
+    def forward(self, state, joint_action_one_hot):
+        # Flatten joint_action_one_hot từ (Batch, 11, n_actions) -> (Batch, 11 * n_actions)
+        action_flat = joint_action_one_hot.view(joint_action_one_hot.size(0), -1)
+        x = torch.cat([state, action_flat], dim=-1)
+        return self.net(x)

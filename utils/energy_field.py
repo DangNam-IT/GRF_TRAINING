@@ -1,33 +1,34 @@
-# import numpy as np
+import numpy as np
 
-# def calculate_gaussian_energy(pos, target_pos, is_attraction=True, sigma=1.0, scale=10.0):
-#     """
-#     Tính toán giá trị năng lượng dựa trên phân phối Gaussian.
-#     - Lực hút (is_attraction=True): mang giá trị âm, hướng tới mục tiêu có lợi.
-#     - Lực đẩy (is_attraction=False): mang giá trị dương, đại diện cho chướng ngại vật/đối thủ.
-#     """
-#     pos = np.array(pos)
-#     target_pos = np.array(target_pos)
-    
-#     # Tính bình phương khoảng cách
-#     distance_sq = np.sum((pos - target_pos)**2)
-    
-#     # Tính năng lượng theo Gaussian
-#     energy = scale * np.exp(-distance_sq / (2 * sigma**2))
-    
-#     return -energy if is_attraction else energy
+class EnergyFieldDefiner:
+    def __init__(self, sigma_attract=0.9, sigma_repel=0.3, scale_attract=-0.9, scale_repel=-0.5):
+        self.sigma_attract = sigma_attract
+        self.sigma_repel = sigma_repel
+        self.scale_attract = scale_attract
+        self.scale_repel = scale_repel
 
-# def get_total_energy_field(agent_pos, goals, obstacles):
-#     """
-#     Tổng hợp trường năng lượng từ các lực hút (goals) và lực đẩy (obstacles).
-#     """
-#     total_energy = 0.0
-    
-#     for goal in goals:
-#         total_energy += calculate_gaussian_energy(agent_pos, goal, is_attraction=True)
+    def _gaussian_kernel(self, pos, target, sigma, scale):
+        """Tính giá trị phân phối Gaussian cho một điểm ảnh hưởng."""
+        distance_sq = np.sum((pos - target)**2, axis=-1)
+        return scale * np.exp(-distance_sq / (sigma**2))
+
+    def calculate_field_for_agents(self, agent_positions, goals, obstacles):
+        """
+        Tính toán Energy Field cho toàn bộ 11 tác tử cùng lúc (Vectorized).
+        :param agent_positions: Mảng numpy shape (11, 2)
+        :param goals: Danh sách các tọa độ mục tiêu (ví dụ: quả bóng)
+        :param obstacles: Danh sách tọa độ đối thủ (shape (N, 2))
+        :return: Mảng energy values shape (11,)
+        """
+        energy_values = np.zeros(len(agent_positions))
         
-#     for obs in obstacles:
-#         total_energy += calculate_gaussian_energy(agent_pos, obs, is_attraction=False)
-        
-#     return total_energy
-
+        # Lực hút (Mang giá trị âm để tác tử có xu hướng giảm thiểu năng lượng / tối đa hóa phần thưởng âm)
+        for goal in goals:
+            energy_values -= self._gaussian_kernel(agent_positions, goal, self.sigma_attract, self.scale_attract)
+            
+        # Lực đẩy (Mang giá trị dương để tránh né)
+        for obs in obstacles:
+            # Broadcast obs để tính khoảng cách tới toàn bộ 11 agents
+            energy_values += self._gaussian_kernel(agent_positions, obs, self.sigma_repel, self.scale_repel)
+            
+        return energy_values
