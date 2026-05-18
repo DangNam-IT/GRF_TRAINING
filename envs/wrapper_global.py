@@ -13,38 +13,45 @@ class GFootballGlobalWrapper(gym.Wrapper):
         self.last_raw_obs = None
 
     def _extract_positions(self, raw_obs):
-        base_obs = raw_obs[0] 
+        base_obs = raw_obs[0]
         left_team = np.array(base_obs['left_team'])
         right_team = np.array(base_obs['right_team'])
         ball = np.array(base_obs['ball'][:2])
-        
+
         # --- BẮT ĐẦU LOGIC XỬ LÝ PHẠT GÓC ---
         # Kiểm tra xem có phải phạt góc không (Bóng nằm ở 4 góc sân)
         # Tọa độ góc sân xấp xỉ X = +/- 1.0, Y = +/- 0.42
         is_corner_kick = (abs(abs(ball[0]) - 1.0) < 0.05) and (abs(abs(ball[1]) - 0.42) < 0.05)
-        
+
         if is_corner_kick:
             # 1. Đổi mục tiêu (Lực hút) vào trong vòng cấm địa thay vì quả bóng
             # Giả sử ta đang tấn công khung thành bên phải (X = 1.0)
-            target_sign = 1.0 if ball[0] > 0 else -1.0 
-            
+            target_sign = 1.0 if ball[0] > 0 else -1.0
+
             near_post = [target_sign * 0.9, ball[1] * 0.1] # Gần cột góc hơn
             far_post = [target_sign * 0.9, -ball[1] * 0.1] # Góc đối diện
             penalty_spot = [target_sign * 0.8, 0.0]        # Chấm 11m
-            
-            goals = [near_post, far_post, penalty_spot]
-            
+
+            # Mỗi mục tiêu có tham số hút lực riêng
+            goals = [
+                {'position': near_post, 'sigma': 0.8, 'scale': -0.7},      # Cột gần: hút mạnh
+                {'position': far_post, 'sigma': 0.7, 'scale': -0.7},       # Cột xa: hút vừa
+                {'position': penalty_spot, 'sigma': 0.85, 'scale': -0.7}   # Chấm phạt: hút trung bình
+            ]
+
             # 2. Thêm quả bóng (ở cột góc) vào danh sách CHƯỚNG NGẠI VẬT (Lực đẩy)
             # Điều này ép các cầu thủ phải tránh xa khu vực đá phạt
-            obstacles = list(right_team) + [ball] 
-            
+            # Tạo obstacles với tham số riêng
+            obstacles = [{'position': pos, 'sigma': 0.3, 'scale': -0.1} for pos in right_team]
+            obstacles.append({'position': ball, 'sigma': 0.4, 'scale': -0.7})  # Quả bóng đẩy mạnh hơn
+
         else:
             # Nếu là bóng sống bình thường, bóng vẫn là mục tiêu (Lực hút)
-            goals = [ball]
-            obstacles = right_team
-            
+            goals = [ball]  # Hỗ trợ backward compatible - chỉ vị trí
+            obstacles = list(right_team)  # Hỗ trợ backward compatible - chỉ vị trí
+
         # --- KẾT THÚC LOGIC ---
-            
+
         return left_team, goals, obstacles
 
     def _process_single_obs(self, single_obs, energy_val):
