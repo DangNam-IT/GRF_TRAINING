@@ -2,12 +2,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 # # Cột CSV được ghi bởi train_phase1.py (6 cột):
-# [Episode, Total_reward_buffer, Total_reward_view, Reward_env, Reward_energy, Reward_ball_owned]
-CSV_COLUMNS = ['Episode', 'Total_reward_buffer', 'Total_reward_view', 'Reward_env', 'Reward_energy', 'Reward_ball_owned']
+# [Episode, Total_reward_buffer, Reward_env, Reward_energy, Reward_ball_owned]
+CSV_COLUMNS = ['Episode', 'Total_reward_buffer', 'Reward_env', 'Reward_energy', 'Reward_ball_owned']
 
 REWARD_CONFIGS = [
     {'col': 'Total_reward_buffer', 'color': '#2196F3', 'label': 'Total Reward (Buffer / Train)'},
-    {'col': 'Total_reward_view',   'color': '#03A9F4', 'label': 'Total Reward (View) — phải ≈ Buffer'},
     {'col': 'Reward_env',          'color': '#4CAF50', 'label': 'Env Reward (Score)'},
     {'col': 'Reward_energy',       'color': '#FF9800', 'label': 'Energy Reward'},
     {'col': 'Reward_ball_owned',   'color': '#9C27B0', 'label': 'Ball Owned Reward'},
@@ -98,7 +97,7 @@ def plot_combined(csv_path, save_path, title):
 
 
 if __name__ == "__main__":
-    CSV   = 'experiments/phase1_training.csv'
+    CSV   = 'experiments/phase1_training_test.csv'
     TITLE = 'HES-COMA Phase 1: Global Strategic Movement'
 
     plot_learning_curve(CSV, 'experiments/phase1_chart.png', TITLE)
