@@ -45,7 +45,7 @@ class EnergyFieldDefiner:
             position, sigma, scale = self._extract_position_and_params(
                 goal, self.sigma_attract, self.scale_attract
             )
-            energy_values -= self._gaussian_kernel(agent_positions, position, sigma, scale)
+            energy_values += self._gaussian_kernel(agent_positions, position, sigma, scale)
 
         # Lực đẩy (Mang giá trị dương để tránh né)
         for obs in obstacles:
@@ -54,4 +54,4 @@ class EnergyFieldDefiner:
             )
             energy_values += self._gaussian_kernel(agent_positions, position, sigma, scale)
 
-        return energy_values
+        return energy_values     
