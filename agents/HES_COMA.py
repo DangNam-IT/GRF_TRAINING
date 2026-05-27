@@ -129,10 +129,11 @@ class HES_COMA_Agent:
         # ── Giải phóng buffer ───────────────────────────────────────────────
         buffer.clear()
 
-    def save_model(self, filepath: str) -> None:
+    def save_model(self, filepath: str, episode: int) -> None:
         """Lưu trọng số và cấu hình không gian môi trường của Agent."""
+        file_name = f"{filepath}_ep_{episode}.pth"
         import os
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        os.makedirs(os.path.dirname(file_name), exist_ok=True)
         checkpoint = {
             "actor_state_dict":  self.actor.state_dict(),
             "critic_state_dict": self.critic.state_dict(),
@@ -143,11 +144,13 @@ class HES_COMA_Agent:
                 "n_agents":   self.n_agents,
             },
         }
-        torch.save(checkpoint, filepath)
+        torch.save(checkpoint, file_name)
+        print(f"Đã lưu mô hình tại: {file_name}")
 
-    def load_model(self, filepath: str) -> None:
+    def load_model(self, filepath: str, episode: int) -> None:
         """Tải lại trọng số cho Agent từ file."""
-        checkpoint: dict = torch.load(filepath, map_location=self.device)
+        file_name = f"{filepath}_ep_{episode}.pth"
+        checkpoint: dict = torch.load(file_name, map_location=self.device)
         self.actor.load_state_dict(checkpoint["actor_state_dict"])
         self.critic.load_state_dict(checkpoint["critic_state_dict"])
-        print(f"Đã tải thành công mô hình từ: {filepath}")
+        print(f"Đã tải thành công mô hình từ: {file_name}")
