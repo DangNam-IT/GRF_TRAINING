@@ -423,8 +423,6 @@ class GFootballGlobalWrapper(gym.Wrapper):
 
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
         base_obs = raw_obs[0] if raw_obs is not None else None
-        ball_owned_team = base_obs.get("ball_owned_team", -1) if base_obs is not None else -1
-        ball_owned_player = base_obs.get("ball_owned_player", -1) if base_obs is not None else -1
         
         for i in range(self.num_agents):
             if i == kicker_id:
