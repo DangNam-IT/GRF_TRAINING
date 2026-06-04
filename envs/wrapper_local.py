@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, List
 
 import gym
 import numpy as np
@@ -27,10 +27,10 @@ class GFootballLocalWrapper(gym.Wrapper):
 
     # ── Hằng số hành động ──────────────────────────────────────────────────────
     # GAgent output [0..9]: 0-7 → di chuyển (GRF 1-8), 8-9 → STOP (GRF 0)
-    STOP_ACTIONS: frozenset[int] = frozenset({8, 9})
+    STOP_ACTIONS: frozenset[int] = frozenset({14})
 
     # LAgent output [0..n_tactic_actions-1] → GRF tactical action
-    # 0: Short Pass (11), 1: High Pass (12)
+    # 0: Short Pass (11), 1: Shot (12)
     TACTIC_MAP: list[int] = [11, 12]
 
     def __init__(self, env: gym.Env, num_agents: int = 11) -> None:
@@ -40,7 +40,8 @@ class GFootballLocalWrapper(gym.Wrapper):
 
         # ── Không gian quan sát ───────────────────────────────────────────────
         self.state_dim:  int = 46  # left(22) + right(22) + ball(2)
-        self.obs_dim_g:  int = 33  # 32 rays + 1 energy  (đồng bộ Phase 1)
+        # obs_dim_g đồng bộ Phase 1: rays(32) + energy(1) + ball_owned(1) + sticky(10) + role(10) = 54
+        self.obs_dim_g:  int = 54
         self.obs_dim_l:  int = 32  # Ray-info thuần — KHÔNG có energy
 
         # Energy field vẫn cần để xây dựng obs_g
@@ -50,6 +51,10 @@ class GFootballLocalWrapper(gym.Wrapper):
         self.last_raw_obs: Optional[RawObs] = None
         self._kicker_id:   Optional[int]    = None
         self._has_kicked:  bool             = False
+        self._aim_frames:  int              = 0
+        self._kick_frames: int              = 0
+        self._AIM_DURATION: int             = 5
+        self._KICK_DURATION: int            = 4
 
     # =========================================================================
     # PHẦN 1: TRÍCH XUẤT VỊ TRÍ (cho Energy Field của GAgent)
@@ -66,35 +71,88 @@ class GFootballLocalWrapper(gym.Wrapper):
         list[FieldItem],       # obstacles
     ]:
         """
-        Tạo goals/obstacles cho Energy Field — giống hệt wrapper_global.
+        Tạo goals/obstacles cho Energy Field — mirror wrapper_global.
+        Tích hợp Dynamic Energy Fields:
+        - Anticipatory Attractors (ball_direction)
+        - Directional Repulsors (right_team_direction)
         Trả về thêm right_team và ball để tái sử dụng ở các hàm khác.
+
+        [MODULE 2 - FIX 0]: ball_direction đọc từ key riêng 'ball_direction',
+        KHÔNG phải từ base_obs['ball'][3:5] (ball chỉ có 3 phần tử [x,y,z]).
+        [MODULE 2 - FIX 2]: Phát hiện ball_in_flight — khóa attractor cố định
+        khi bóng bay bổng trên không (ball_z > 0.08).
         """
         base_obs   = raw_obs[0]
         left_team:  NDArray[np.float32] = np.array(base_obs["left_team"])
         right_team: NDArray[np.float32] = np.array(base_obs["right_team"])
         ball:       NDArray[np.float32] = np.array(base_obs["ball"][:2])
+        ball_z:     float               = float(base_obs["ball"][2])
 
-        is_corner_kick: bool = (
-            abs(abs(ball[0]) - 1.0) < 0.05 and abs(abs(ball[1]) - 0.42) < 0.05
-        )
+        # [MODULE 2 - FIX 0]: Dùng key 'ball_direction' riêng (observation.md)
+        ball_dir_raw = base_obs.get("ball_direction", [0.0, 0.0, 0.0])
+        ball_direction: NDArray[np.float32] = np.array(ball_dir_raw[:2], dtype=np.float32)
+
+        right_team_direction_raw = base_obs.get("right_team_direction", [[0.0, 0.0]] * len(right_team))
+        right_team_direction: NDArray[np.float32] = np.array(right_team_direction_raw, dtype=np.float32)
+
+        # [MODULE 2 - FIX 2]: Phát hiện bóng đang bay bổng
+        ball_in_flight: bool = ball_z > 0.08
+
+        # Thống nhất: sử dụng game_mode == 4 để nhận diện phạt góc
+        is_corner_kick: bool = (base_obs.get("game_mode", 0) == 4)
 
         if is_corner_kick:
-            target_sign:  float                = 1.0 if ball[0] > 0 else -1.0
-            near_post:    NDArray[np.float32]  = np.array([target_sign * 0.9,  ball[1] * 0.1])
-            far_post:     NDArray[np.float32]  = np.array([target_sign * 0.9, -ball[1] * 0.1])
-            penalty_spot: NDArray[np.float32]  = np.array([target_sign * 0.8,  0.0])
-            goals: list[FieldItem] = [
-                {"position": near_post,    "sigma": 0.35, "scale": -1.5},
-                {"position": far_post,     "sigma": 0.35, "scale": -1.0},
-                {"position": penalty_spot, "sigma": 0.40, "scale": -1.2},
+            target_sign: float = 1.0 if ball[0] > 0 else -1.0
+
+            if ball_in_flight:
+                # [MODULE 2 - FIX 2]: Bóng bay bổng — Landing Zone cố định
+                near_post:    NDArray[np.float32] = np.array([target_sign * 0.9,  0.05])
+                far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -0.05])
+                penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
+            else:
+                # Anticipatory Attractors: dịch chuyển mục tiêu theo quỹ đạo bóng dự kiến
+                k_ball: float = 5.0
+                predicted_ball_pos: NDArray[np.float32] = ball + ball_direction * k_ball
+                near_post    = np.array([target_sign * 0.9,  predicted_ball_pos[1] * 0.1])
+                far_post     = np.array([target_sign * 0.9, -predicted_ball_pos[1] * 0.1])
+                penalty_spot = np.array([target_sign * 0.8,  0.0])
+
+            goals = [
+                {"position": near_post,    "sigma": 0.15, "scale": -3.0},
+                {"position": far_post,     "sigma": 0.20, "scale": -2.0},
+                {"position": penalty_spot, "sigma": 0.25, "scale": -2.5},
             ]
-            obstacles: list[FieldItem] = [
-                {"position": pos, "sigma": 0.18, "scale": 1.2} for pos in right_team
-            ]
-            obstacles.append({"position": ball, "sigma": 0.20, "scale": 1.8})
+
+            # Directional Repulsors: đẩy tâm chướng ngại vật theo hướng chạy hậu vệ
+            # [MODULE 2 - FIX 3]: sigma=0.06 giữ kẽ hở phòng ngự
+            k_opp: float = 3.0
+            obstacles = []
+            for j, pos in enumerate(right_team):
+                opp_dir: NDArray[np.float32] = (
+                    right_team_direction[j] if j < len(right_team_direction)
+                    else np.zeros(2, dtype=np.float32)
+                )
+                predicted_opp_pos: NDArray[np.float32] = pos + opp_dir * k_opp
+                obstacles.append({"position": predicted_opp_pos, "sigma": 0.06, "scale": 1.5})
+
+            if not ball_in_flight:
+                predicted_ball_obs: NDArray[np.float32] = ball + ball_direction * k_opp
+                obstacles.append({"position": predicted_ball_obs, "sigma": 0.15, "scale": 2.5})
+
         else:
-            goals = [{"position": ball, "sigma": 0.40, "scale": -1.0}]
-            obstacles = [{"position": pos, "sigma": 0.18, "scale": 1.0} for pos in right_team]
+            k_ball = 5.0
+            predicted_ball_pos = ball + ball_direction * k_ball
+            goals = [{"position": predicted_ball_pos, "sigma": 0.25, "scale": -2.0}]
+
+            k_opp = 3.0
+            obstacles = []
+            for j, pos in enumerate(right_team):
+                opp_dir = (
+                    right_team_direction[j] if j < len(right_team_direction)
+                    else np.zeros(2, dtype=np.float32)
+                )
+                predicted_opp_pos = pos + opp_dir * k_opp
+                obstacles.append({"position": predicted_opp_pos, "sigma": 0.06, "scale": 1.2})
 
         return left_team, right_team, ball, goals, obstacles
 
@@ -109,11 +167,11 @@ class GFootballLocalWrapper(gym.Wrapper):
         right_team:   NDArray[np.float32],
         ball:         NDArray[np.float32],
         goals:        list[FieldItem],
-        max_distance: float = 2.0,
+        max_distance: float = 0.5,
     ) -> NDArray[np.float32]:
         """8 hướng × 4 object types → (32,) normalized [0, 1]."""
         angles:           NDArray[np.float32] = np.linspace(0, 2 * np.pi, 8, endpoint=False)
-        detection_radius: float               = 0.15
+        detection_radius: float               = 0.025
         ray_distances:    list[float]         = []
 
         for angle in angles:
@@ -177,22 +235,50 @@ class GFootballLocalWrapper(gym.Wrapper):
 
     def _process_global_obs(
         self,
+        agent_idx:  int,
         agent_pos:  NDArray[np.float32],
         left_team:  NDArray[np.float32],
         right_team: NDArray[np.float32],
         ball:       NDArray[np.float32],
         goals:      list[FieldItem],
         energy_val: float,
+        raw_obs_i:  dict[str, Any],
+        base_obs:   dict[str, Any],
     ) -> NDArray[np.float32]:
         """
-        obs_g: 32 rays + 1 energy = 33 chiều.
+        obs_g: Mirror wrapper_global._process_single_obs (54 chiều).
+        rays(32) + energy(1) + ball_owned(1) + sticky(10) + role(10) = 54.
         Giữ nguyên chuẩn Phase 1 để load model đúng shape.
         """
-        ray_info:          NDArray[np.float32] = self._raycast_from_agent(
+        ray_info: NDArray[np.float32] = self._raycast_from_agent(
             agent_pos, left_team, right_team, ball, goals
         )
         energy_field_info: NDArray[np.float32] = np.array([energy_val], dtype=np.float32)
-        return np.concatenate([ray_info, energy_field_info])  # (33,)
+
+        # Cờ sở hữu bóng (Boolean flag)
+        ball_owned_team = base_obs.get("ball_owned_team", -1)
+        ball_owned_player = base_obs.get("ball_owned_player", -1)
+        is_ball_owned = 1.0 if (ball_owned_team == 0 and ball_owned_player == agent_idx) else 0.0
+        is_ball_owned_arr: NDArray[np.float32] = np.array([is_ball_owned], dtype=np.float32)
+
+        # Trạng thái nút bấm (Sticky actions)
+        sticky_actions_raw = raw_obs_i.get("sticky_actions", [0] * 10)
+        sticky_actions: NDArray[np.float32] = np.array(sticky_actions_raw, dtype=np.float32)
+
+        # Vị trí sở trường (Left team roles — one-hot)
+        roles_raw = base_obs.get("left_team_roles", [0] * 11)
+        role_idx = roles_raw[agent_idx] if agent_idx < len(roles_raw) else 0
+        role_onehot: NDArray[np.float32] = np.zeros(10, dtype=np.float32)
+        if 0 <= role_idx < 10:
+            role_onehot[role_idx] = 1.0
+
+        return np.concatenate([
+            ray_info,           # 32
+            energy_field_info,  # 1
+            is_ball_owned_arr,  # 1
+            sticky_actions,     # 10
+            role_onehot,        # 10
+        ])  # (54,)
 
     def _process_local_obs(
         self,
@@ -232,15 +318,41 @@ class GFootballLocalWrapper(gym.Wrapper):
         """Trả về ID người đứng gần bóng góc nhất, hoặc None nếu không phải phạt góc."""
         if raw_obs is None:
             return None
-        base_obs  = raw_obs[0]
+        base_obs = raw_obs[0]
+        # Thống nhất: sử dụng game_mode == 4 để nhận diện phạt góc
         ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
-        is_corner: bool = (
+        is_corner_kick: bool = (
             abs(abs(ball[0]) - 1.0) < 0.05 and abs(abs(ball[1]) - 0.42) < 0.05
         )
-        if is_corner:
+        if is_corner_kick:
+            ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
             left_team: NDArray[np.float32] = np.array(base_obs["left_team"])
             return int(np.argmin(np.sum((left_team - ball) ** 2, axis=1)))
         return None
+
+    def _get_aim_action(
+        self,
+        kicker_pos: NDArray[np.float32],
+        target_pos: NDArray[np.float32],
+    ) -> int:
+        delta: NDArray[np.float32] = target_pos - kicker_pos
+        norm: float = float(np.linalg.norm(delta))
+        if norm < 1e-6:
+            return 0  
+
+        angle: float = float(np.arctan2(float(delta[1]), float(delta[0]))) 
+        sector: int = int(round(angle / (np.pi / 4))) % 8
+        # GRF coordinate system: y increases DOWNWARDS.
+        # sector 0 (angle 0): Right (5)
+        # sector 1 (angle pi/4): BottomRight (6)
+        # sector 2 (angle pi/2): Bottom (7)
+        # sector 3 (angle 3pi/4): BottomLeft (8)
+        # sector 4 (angle pi): Left (1)
+        # sector 5 (angle -3pi/4): TopLeft (2)
+        # sector 6 (angle -pi/2): Top (3)
+        # sector 7 (angle -pi/4): TopRight (4)
+        action_map: List[int] = [5, 6, 7, 8, 1, 2, 3, 4]
+        return action_map[sector]
 
     # =========================================================================
     # PHẦN 5: ÁNH XẠ HÀNH ĐỘNG
@@ -251,45 +363,80 @@ class GFootballLocalWrapper(gym.Wrapper):
         agent_actions: NDArray[np.int64],
         raw_obs:       Optional[RawObs] = None,
     ) -> NDArray[np.int64]:
-        """
-        Bộ lọc hành động GAgent (giữ corner-kick state machine từ Phase 1).
-        GAgent output [0..9]:
-          0-7 → GRF 1-8  (di chuyển)
-          8-9 → GRF 0    (idle/stop)
-        """
         kicker_id: Optional[int] = self._kicker_id
 
-        # Kiểm tra thoát Phase 3 (bóng đã rời góc)
         if kicker_id is not None and self._has_kicked and raw_obs is not None:
-            base_obs              = raw_obs[0]
+            base_obs = raw_obs[0]
             ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
-            ball_speed: float = (
-                float(np.linalg.norm(base_obs["ball"][3:5]))
-                if len(base_obs["ball"]) >= 5
-                else 0.0
-            )
-            kicker_pos:            NDArray[np.float32] = np.array(base_obs["left_team"][kicker_id])
-            ball_dist_from_kicker: float               = float(np.linalg.norm(ball - kicker_pos))
+            # [MODULE 2 - FIX 0]: Dùng key 'ball_direction' đúng, KHÔNG phải ball[3:5]
+            ball_dir_raw = base_obs.get("ball_direction", [0.0, 0.0, 0.0])
+            ball_speed: float = float(np.linalg.norm(ball_dir_raw[:2]))
+            kicker_pos: NDArray[np.float32] = np.array(base_obs["left_team"][kicker_id])
+            ball_dist_from_kicker: float = float(np.linalg.norm(ball - kicker_pos))
+
             if ball_speed > 0.1 or ball_dist_from_kicker > 0.05:
-                self._kicker_id  = None
-                self._has_kicked = False
-                kicker_id        = None
+                self._kicker_id   = None
+                self._aim_frames  = 0
+                self._kick_frames = 0
+                self._has_kicked  = False
+                kicker_id         = None
+
+        # Tính aim_action cho PHASE_AIM (dùng lại nhiều frame)
+        aim_action: int = 0
+        if kicker_id is not None and self._aim_frames < self._AIM_DURATION and raw_obs is not None:
+            _b: NDArray[np.float32] = np.array(raw_obs[0]["ball"][:2])
+            _s: float = 1.0 if _b[0] > 0 else -1.0
+            kp: NDArray[np.float32] = np.array(raw_obs[0]["left_team"][kicker_id])
+            
+            # Ta tìm đồng đội ĐANG ĐỨNG TRONG VÒNG CẤM để nhắm chuẩn xác.
+            left_team_pos = np.array(raw_obs[0]["left_team"])
+            best_target: Optional[NDArray[np.float32]] = None
+            min_dist_to_goal = float('inf')
+            
+            for j, pos in enumerate(left_team_pos):
+                if j == kicker_id:
+                    continue
+                # Kiểm tra xem cầu thủ có trong/gần vòng cấm không (x > 0.65, |y| < 0.25)
+                if _s * pos[0] > 0.65 and abs(pos[1]) < 0.1:
+                    dist = float(np.linalg.norm(pos - np.array([_s * 1.0, 0.0])))
+                    if dist < min_dist_to_goal:
+                        min_dist_to_goal = dist
+                        best_target = pos
+            
+            if best_target is None:
+                # Fallback nếu không có ai trong vòng cấm
+                best_target = np.array([_s * 0.85, 0.0], dtype=np.float32)
+                
+            aim_action = self._get_aim_action(kp, best_target)
 
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
+        base_obs = raw_obs[0] if raw_obs is not None else None
+        ball_owned_team = base_obs.get("ball_owned_team", -1) if base_obs is not None else -1
+        ball_owned_player = base_obs.get("ball_owned_player", -1) if base_obs is not None else -1
+        
         for i in range(self.num_agents):
             if i == kicker_id:
-                if not self._has_kicked:
-                    mapped_actions[i] = random.choice([9, 10])  # High Pass
+                if self._aim_frames < self._AIM_DURATION:
+                    # PHASE_AIM: Lặp lại hành động xoay hướng trong nhiều frame
+                    # để GRF engine kịp rotate cầu thủ quay mặt vào vòng cấm.
+                    mapped_actions[i] = aim_action
+                    self._aim_frames += 1
+                elif self._kick_frames < self._KICK_DURATION:
+                    # PHASE_KICK: Nhấn giữ nút High Pass (action 10) trong nhiều frame.
+                    # 1 frame = đường chuyền rất nhẹ (sẽ rơi vào chân người gần nhất).
+                    # 4-5 frame = tạt bổng sâu vào trong vòng cấm địa.
+                    mapped_actions[i] = 10
+                    self._kick_frames += 1
+                else:
                     self._has_kicked  = True
-                else:
-                    mapped_actions[i] = 0  # Idle
+                    mapped_actions[i] = 0
             else:
-                act: int = int(agent_actions[i])
-                if 0 < act <= 8:
-                    mapped_actions[i] = act
+                # ĐỐI VỚI 10 CẦU THỦ CHẠY CHỖ: Ánh xạ chuẩn từ không gian [0 -> 9] của mạng nơ-ron
+                act = int(agent_actions[i])
+                if 0 <= act < 8:
+                    mapped_actions[i] = act+1
                 else:
-                    mapped_actions[i] = 0     # STOP → idle
-
+                    mapped_actions[i] = 14  # Lệnh giải phóng phím dính, đứng im rình rập khoảng trống
         return mapped_actions
 
     # =========================================================================
@@ -300,12 +447,12 @@ class GFootballLocalWrapper(gym.Wrapper):
         self, raw_obs: RawObs
     ) -> Tuple[
         NDArray[np.float32],  # state  (46,)
-        NDArray[np.float32],  # obs_g  (11, 33)
+        NDArray[np.float32],  # obs_g  (11, 54)
         NDArray[np.float32],  # obs_l  (11, 32)
     ]:
         """
         Trích xuất (state, obs_g, obs_l) từ raw_obs.
-          obs_g: 32 rays + 1 energy = 33  — Global hierarchy
+          obs_g: rays(32) + energy(1) + ball_owned(1) + sticky(10) + role(10) = 54  — Global hierarchy
           obs_l: 32 rays (không energy)   — Local hierarchy
         """
         left_team, right_team, ball, goals, obstacles = self._extract_positions(raw_obs)
@@ -317,9 +464,12 @@ class GFootballLocalWrapper(gym.Wrapper):
         state: NDArray[np.float32] = self._build_global_state(base_obs)
 
         obs_g: NDArray[np.float32] = np.array([
-            self._process_global_obs(left_team[i], left_team, right_team, ball, goals, energy_fields[i])
+            self._process_global_obs(
+                i, left_team[i], left_team, right_team, ball, goals,
+                energy_fields[i], raw_obs[i], base_obs
+            )
             for i in range(self.num_agents)
-        ])  # (11, 33)
+        ])  # (11, 54)
 
         obs_l: NDArray[np.float32] = np.array([
             self._process_local_obs(left_team[i], left_team, right_team, ball, goals)
@@ -338,13 +488,15 @@ class GFootballLocalWrapper(gym.Wrapper):
         """
         Returns:
             state:  (46,)
-            obs_g:  (11, 33)
+            obs_g:  (11, 54)
             obs_l:  (11, 32)
         """
         raw_obs: RawObs = self.env.reset(**kwargs)
         self.last_raw_obs = raw_obs
         self._kicker_id   = None
         self._has_kicked  = False
+        self._aim_frames  = 0
+        self._kick_frames = 0
         return self._get_all_obses_and_state(raw_obs)
 
     def step_global(
@@ -352,7 +504,7 @@ class GFootballLocalWrapper(gym.Wrapper):
         global_actions: NDArray[np.int64],
     ) -> Tuple[
         NDArray[np.float32],  # state  (46,)
-        NDArray[np.float32],  # obs_g  (11, 33)
+        NDArray[np.float32],  # obs_g  (11, 54)
         NDArray[np.float32],  # obs_l  (11, 32)
         NDArray[np.float32],  # rewards (11,) — zeros (LAgent không hành động)
         bool,                 # done
@@ -379,75 +531,182 @@ class GFootballLocalWrapper(gym.Wrapper):
         global_actions: NDArray[np.int64],   # (11,) output gốc của GAgent
     ) -> Tuple[
         NDArray[np.float32],  # state   (46,)
-        NDArray[np.float32],  # obs_g   (11, 33)
+        NDArray[np.float32],  # obs_g   (11, 54)
         NDArray[np.float32],  # obs_l   (11, 32)
-        NDArray[np.float32],  # rewards (11,)
+        NDArray[np.float32],  # shaped_rewards (11,)
         bool,                 # done
     ]:
         """
         Bước khi ít nhất một GAgent chọn STOP.
 
-        Với agent i:
-          - active_mask[i] == True  → TACTIC_MAP[local_actions[i] % n]
-          - active_mask[i] == False → global_actions[i] + 1 (di chuyển tiếp)
+        Reward shaping theo Reward_logic.md §2:
+          R_i^l = R_env + 0.5·I(Passing) + 1.0·I(Assist) + R_role_based + R_ball_approach + R_possession
+
+        - R_env:          GRF sparse reward (normalized).
+        - R_passing:      +0.5 khi kicker chuyền thành công (ball_owned chuyển sang agent khác).
+        - R_assist:       +1.0 khi kicker tạo ra assist (bàn thắng sau pha kiến tạo).
+        - R_role_based:   Thưởng/phạt theo vùng chiến thuật (near_post, far_post, penalty_spot).
+        - R_ball_approach: Sau khi bóng vào vòng cấm, khuyến khích agent chủ động áp sát.
+        - R_possession:   Possession change (+/-).
         """
-        kicker_id: Optional[int] = self._kicker_id
+        # ── Hằng số reward (Table 13 §2) ─────────────────────────────────────
+        ENV_SCALE:         float = 1.0 / self.num_agents
+        PASSING_REWARD:    float =  0.5   # Kicker tạt bóng thành công
+        ASSIST_REWARD:     float =  1.0   # Kiến tạo dẫn đến bàn thắng
+        POSSESSION_LOSS:   float = -2.0
+        POSSESSION_GAIN:   float =  1.0
+        BALL_APPROACH_R:   float =  0.3   # Tiến về điểm rơi sau khi bóng vào vùng cấm
+        # Role-based (§1.4): thưởng theo vùng chiến thuật khi ghi bàn
+        ROLE_NEAR_POST:    float =  1.0
+        ROLE_FAR_POST:     float =  1.0
+        ROLE_PENALTY_SPOT: float =  1.5   # Khó hơn → thưởng thêm hệ số khuyến khích
 
-        # Kiểm tra thoát Phase 3 (bóng đã rời góc)
-        if kicker_id is not None and self._has_kicked and self.last_raw_obs is not None:
-            base_obs = self.last_raw_obs[0]
-            ball:       NDArray[np.float32] = np.array(base_obs["ball"][:2])
-            ball_speed: float = (
-                float(np.linalg.norm(base_obs["ball"][3:5]))
-                if len(base_obs["ball"]) >= 5
-                else 0.0
-            )
-            kicker_pos:           NDArray[np.float32] = np.array(base_obs["left_team"][kicker_id])
-            ball_dist_from_kicker: float = float(np.linalg.norm(ball - kicker_pos))
+        # ── Đọc trạng thái trước bước ─────────────────────────────────────────
+        last_obs  = self.last_raw_obs[0] if self.last_raw_obs is not None else None
+        last_ball_owned:   int = last_obs["ball_owned_team"]           if last_obs else -1
+        last_ball_owned_player: int = last_obs.get("ball_owned_player", -1) if last_obs else -1
+        last_score: list[int]  = list(last_obs["score"])               if last_obs else [0, 0]
 
-            if ball_speed > 0.1 or ball_dist_from_kicker > 0.05:
-                self._kicker_id  = None
-                self._has_kicked = False
-                kicker_id        = None
+        # ── Corner-kick state machine (mirror _map_global_actions) ───────────
+        kicker_id: Optional[int] = self._get_corner_kicker_id(self.last_raw_obs)
+
+        if kicker_id is not None and self._has_kicked and last_obs is not None:
+            b_prev:  NDArray[np.float32] = np.array(last_obs["ball"][:2])
+            # [MODULE 2 - FIX 0]: Dùng key 'ball_direction' đúng
+            spd_raw = last_obs.get("ball_direction", [0.0, 0.0, 0.0])
+            spd:     float = float(np.linalg.norm(spd_raw[:2]))
+            kp: NDArray[np.float32] = np.array(last_obs["left_team"][kicker_id])
+            if spd > 0.1 or float(np.linalg.norm(b_prev - kp)) > 0.05:
+                self._kicker_id   = None
+                self._aim_frames  = 0
+                self._kick_frames = 0
+                self._has_kicked  = False
+                kicker_id         = None
+
+        # Tính aim_action cho PHASE_AIM (dùng lại nhiều frame)
+        aim_action: int = 0
+        if kicker_id is not None and self._aim_frames < self._AIM_DURATION and last_obs is not None:
+            _b: NDArray[np.float32] = np.array(last_obs["ball"][:2])
+            _s: float = 1.0 if _b[0] > 0 else -1.0
+            kp: NDArray[np.float32] = np.array(last_obs["left_team"][kicker_id])
+            
+            left_team_pos = np.array(last_obs["left_team"])
+            best_target: Optional[NDArray[np.float32]] = None
+            min_dist_to_goal = float('inf')
+            
+            for j, pos in enumerate(left_team_pos):
+                if j == kicker_id:
+                    continue
+                if _s * pos[0] > 0.7 and abs(pos[1]) < 0.1:
+                    dist = float(np.linalg.norm(pos - np.array([_s * 1.0, 0.0])))
+                    if dist < min_dist_to_goal:
+                        min_dist_to_goal = dist
+                        best_target = pos
+            
+            if best_target is None:
+                best_target = np.array([_s * 0.85, 0.0], dtype=np.float32)
                 
+            aim_action = self._get_aim_action(kp, best_target)
+
+        # ── Ánh xạ hành động ─────────────────────────────────────────────────
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
         for i in range(self.num_agents):
             if active_mask[i]:
-                tactic_idx:        int = int(local_actions[i]) % self.n_tactic_actions
-                mapped_actions[i]      = self.TACTIC_MAP[tactic_idx]
+                tactic_idx        = int(local_actions[i]) % self.n_tactic_actions
+                mapped_actions[i] = self.TACTIC_MAP[tactic_idx]
             else:
-                act: int = int(global_actions[i])
                 if i == kicker_id:
-                    if not self._has_kicked:
-                        # PHASE 2: Trigger duy nhất 1 frame High Pass
-                        mapped_actions[i] = random.choice([9, 10])
-                        self._has_kicked  = True
+                    if self._aim_frames < self._AIM_DURATION:
+                        mapped_actions[i] = aim_action
+                        self._aim_frames += 1
+                    elif self._kick_frames < self._KICK_DURATION:
+                        mapped_actions[i] = 10
+                        self._kick_frames += 1
                     else:
-                        # PHASE 3: Idle cho đến khi bóng rời góc
+                        self._has_kicked  = True
                         mapped_actions[i] = 0
                 else:
-                    if 0 < act <= 8:
-                        mapped_actions[i] = act
-                    else:
-                        mapped_actions[i] = random.choice([0, 14])
+                    act: int = int(local_actions[i])
+                    mapped_actions[i] = act if 0 < act <= 8 else 0
 
-        raw_obs, rewards, done, info = self.env.step(mapped_actions)
+        raw_obs, rewards_list, done, info = self.env.step(mapped_actions)
+        current_obs = raw_obs[0]
 
-         # Ball possession change
-        current_ball_owned:  int = raw_obs[0]["ball_owned_team"]
-        last_ball_owned:     int = (
-            self.last_raw_obs[0]["ball_owned_team"] if self.last_raw_obs is not None else -1
+        # ── R_env: GRF sparse reward (normalized) ────────────────s────────────
+        rewards_env: NDArray[np.float32] = (
+            np.array(rewards_list, dtype=np.float32) * ENV_SCALE
         )
-        BALL_OWNED_REWARD: float = 0.1
 
+        shaped_rewards: NDArray[np.float32] = rewards_env.copy()
+
+        # ── Đọc trạng thái sau bước ──────────────────────────────────────────
+        current_ball_owned:        int       = current_obs["ball_owned_team"]
+        current_ball_owned_player: int       = current_obs.get("ball_owned_player", -1)
+        current_score: list[int]             = list(current_obs["score"])
+        left_team:     NDArray[np.float32]   = np.array(current_obs["left_team"])
+        ball:          NDArray[np.float32]   = np.array(current_obs["ball"][:2])
+
+        # ── R_passing: Kicker chuyền thành công (+0.5) ───────────────────────
+        # Điều kiện: kicker_id đã được đặt, và quyền sở hữu bóng chuyển sang
+        # đồng đội khác (ball_owned_team=0, ball_owned_player != kicker_id).
+        rewards_passing: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
+        if (
+            kicker_id is not None
+            and last_ball_owned != 0          # trước chưa phải đội ta sở hữu
+            and current_ball_owned == 0       # sau đội ta có bóng
+            and current_ball_owned_player != kicker_id  # người khác nhận
+        ):
+            rewards_passing[kicker_id] = PASSING_REWARD
+            shaped_rewards[kicker_id] += PASSING_REWARD
+
+        # ── R_assist: Kiến tạo dẫn đến bàn thắng (+1.0) ─────────────────────
+        rewards_assist: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
+        scored_this_step: bool = current_score[0] > last_score[0]
+        if scored_this_step and kicker_id is not None and self._has_kicked:
+            rewards_assist[kicker_id] = ASSIST_REWARD
+            shaped_rewards[kicker_id] += ASSIST_REWARD
+
+        # ── R_role_based: Thưởng theo vùng chiến thuật khi ghi bàn ──────────
+        # Xác định target_sign từ vị trí bóng ban đầu (trước reset)
+        rewards_role: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
+        if scored_this_step and last_obs is not None:
+            ball_init: NDArray[np.float32] = np.array(last_obs["ball"][:2])
+            sign: float = 1.0 if ball_init[0] > 0 else -1.0
+
+            # Vùng chiến thuật (theo phân tích §1.4 Reward_logic.md)
+            near_post_zone:    NDArray[np.float32] = np.array([sign * 0.9,  ball_init[1] * 0.1])
+            far_post_zone:     NDArray[np.float32] = np.array([sign * 0.9, -ball_init[1] * 0.1])
+            penalty_spot_zone: NDArray[np.float32] = np.array([sign * 0.8,  0.0])
+
+            for i in range(self.num_agents):
+                pos: NDArray[np.float32] = left_team[i]
+                if float(np.linalg.norm(pos - near_post_zone)) < 0.15:
+                    rewards_role[i] = ROLE_NEAR_POST
+                    shaped_rewards[i] += ROLE_NEAR_POST
+                elif float(np.linalg.norm(pos - far_post_zone)) < 0.15:
+                    rewards_role[i] = ROLE_FAR_POST
+                    shaped_rewards[i] += ROLE_FAR_POST
+                elif float(np.linalg.norm(pos - penalty_spot_zone)) < 0.20:
+                    rewards_role[i] = ROLE_PENALTY_SPOT
+                    shaped_rewards[i] += ROLE_PENALTY_SPOT
+
+        # ── R_ball_approach: Thưởng Sparse khi chạm cắt bóng thành công ─────
+        rewards_approach: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
+        if current_ball_owned == 0 and current_ball_owned_player != -1:
+            if last_ball_owned != 0 or last_ball_owned_player != current_ball_owned_player:
+                # Chỉ thưởng 1 lần khi giành được quyền kiểm soát bóng
+                rewards_approach[current_ball_owned_player] = BALL_APPROACH_R
+                shaped_rewards[current_ball_owned_player] += BALL_APPROACH_R
+
+        # ── R_possession: Kiểm soát bóng (Table 13 §1) ───────────────────────
+        rewards_possession: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
         if current_ball_owned == 1 and last_ball_owned != 1:
-            ball_possess: NDArray[np.float32] = np.full(self.num_agents, -BALL_OWNED_REWARD / self.num_agents, dtype=np.float32)
-            rewards     += ball_possess
+            rewards_possession[:] = POSSESSION_LOSS / self.num_agents
+            shaped_rewards       += rewards_possession
         elif current_ball_owned == 0 and last_ball_owned != 0:
-            ball_possess = np.full(self.num_agents, BALL_OWNED_REWARD / self.num_agents, dtype=np.float32)
-            rewards     += ball_possess
-        
+            rewards_possession[:] = POSSESSION_GAIN / self.num_agents
+            shaped_rewards       += rewards_possession
+
         self.last_raw_obs = raw_obs
-        
         state, obs_g, obs_l = self._get_all_obses_and_state(raw_obs)
-        return state, obs_g, obs_l, np.array(rewards), done
+        return state, obs_g, obs_l, shaped_rewards, done
