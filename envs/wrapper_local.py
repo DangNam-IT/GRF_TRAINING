@@ -85,74 +85,96 @@ class GFootballLocalWrapper(gym.Wrapper):
         base_obs   = raw_obs[0]
         left_team:  NDArray[np.float32] = np.array(base_obs["left_team"])
         right_team: NDArray[np.float32] = np.array(base_obs["right_team"])
-        ball:       NDArray[np.float32] = np.array(base_obs["ball"][:2])
-        ball_z:     float               = float(base_obs["ball"][2])
+        ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
+        is_corner_kick: bool = (
+            abs(abs(ball[0]) - 1.0) < 0.05 and abs(abs(ball[1]) - 0.42) < 0.05
+        )
 
-        # [MODULE 2 - FIX 0]: Dùng key 'ball_direction' riêng (observation.md)
-        ball_dir_raw = base_obs.get("ball_direction", [0.0, 0.0, 0.0])
-        ball_direction: NDArray[np.float32] = np.array(ball_dir_raw[:2], dtype=np.float32)
+        # ball_z:     float               = float(base_obs["ball"][2])
+        # # [MODULE 2 - FIX 0]: Dùng key 'ball_direction' riêng (observation.md)
+        # ball_dir_raw = base_obs.get("ball_direction", [0.0, 0.0, 0.0])
+        # ball_direction: NDArray[np.float32] = np.array(ball_dir_raw[:2], dtype=np.float32)
 
-        right_team_direction_raw = base_obs.get("right_team_direction", [[0.0, 0.0]] * len(right_team))
-        right_team_direction: NDArray[np.float32] = np.array(right_team_direction_raw, dtype=np.float32)
+        # right_team_direction_raw = base_obs.get("right_team_direction", [[0.0, 0.0]] * len(right_team))
+        # right_team_direction: NDArray[np.float32] = np.array(right_team_direction_raw, dtype=np.float32)
 
-        # [MODULE 2 - FIX 2]: Phát hiện bóng đang bay bổng
-        ball_in_flight: bool = ball_z > 0.08
 
-        # Thống nhất: sử dụng game_mode == 4 để nhận diện phạt góc
-        is_corner_kick: bool = (base_obs.get("game_mode", 0) == 4)
+        # if is_corner_kick:
+        #     target_sign: float = 1.0 if ball[0] > 0 else -1.0
+
+        #     if ball_in_flight:
+        #         # [MODULE 2 - FIX 2]: Bóng bay bổng — Landing Zone cố định
+        #         near_post:    NDArray[np.float32] = np.array([target_sign * 0.9,  0.05])
+        #         far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -0.05])
+        #         penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
+        #     else:
+        #         # Anticipatory Attractors: dịch chuyển mục tiêu theo quỹ đạo bóng dự kiến
+        #         k_ball: float = 5.0
+        #         predicted_ball_pos: NDArray[np.float32] = ball + ball_direction * k_ball
+        #         near_post    = np.array([target_sign * 0.9,  predicted_ball_pos[1] * 0.1])
+        #         far_post     = np.array([target_sign * 0.9, -predicted_ball_pos[1] * 0.1])
+        #         penalty_spot = np.array([target_sign * 0.8,  0.0])
+
+        #     goals = [
+        #         {"position": near_post,    "sigma": 0.15, "scale": -3.0},
+        #         {"position": far_post,     "sigma": 0.20, "scale": -2.0},
+        #         {"position": penalty_spot, "sigma": 0.25, "scale": -2.5},
+        #     ]
+
+        #     # Directional Repulsors: đẩy tâm chướng ngại vật theo hướng chạy hậu vệ
+        #     # [MODULE 2 - FIX 3]: sigma=0.06 giữ kẽ hở phòng ngự
+        #     k_opp: float = 3.0
+        #     obstacles = []
+        #     for j, pos in enumerate(right_team):
+        #         opp_dir: NDArray[np.float32] = (
+        #             right_team_direction[j] if j < len(right_team_direction)
+        #             else np.zeros(2, dtype=np.float32)
+        #         )
+        #         predicted_opp_pos: NDArray[np.float32] = pos + opp_dir * k_opp
+        #         obstacles.append({"position": predicted_opp_pos, "sigma": 0.06, "scale": 1.5})
+
+        #     if not ball_in_flight:
+        #         predicted_ball_obs: NDArray[np.float32] = ball + ball_direction * k_opp
+        #         obstacles.append({"position": predicted_ball_obs, "sigma": 0.15, "scale": 2.5})
+
+        # else:
+        #     k_ball = 5.0
+        #     predicted_ball_pos = ball + ball_direction * k_ball
+        #     goals = [{"position": predicted_ball_pos, "sigma": 0.25, "scale": -2.0}]
+
+        #     k_opp = 3.0
+        #     obstacles = []
+        #     for j, pos in enumerate(right_team):
+        #         opp_dir = (
+        #             right_team_direction[j] if j < len(right_team_direction)
+        #             else np.zeros(2, dtype=np.float32)
+        #         )
+        #         predicted_opp_pos = pos + opp_dir * k_opp
+        #         obstacles.append({"position": predicted_opp_pos, "sigma": 0.06, "scale": 1.2})
+
+        obstacles = []
 
         if is_corner_kick:
-            target_sign: float = 1.0 if ball[0] > 0 else -1.0
+            target_sign:  float = 1.0 if ball[0] > 0 else -1.0
+            near_post:    NDArray[np.float32] = np.array([target_sign * 0.9,  ball[1] * 0.1])
+            far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -ball[1] * 0.1])
+            penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
 
-            if ball_in_flight:
-                # [MODULE 2 - FIX 2]: Bóng bay bổng — Landing Zone cố định
-                near_post:    NDArray[np.float32] = np.array([target_sign * 0.9,  0.05])
-                far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -0.05])
-                penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
-            else:
-                # Anticipatory Attractors: dịch chuyển mục tiêu theo quỹ đạo bóng dự kiến
-                k_ball: float = 5.0
-                predicted_ball_pos: NDArray[np.float32] = ball + ball_direction * k_ball
-                near_post    = np.array([target_sign * 0.9,  predicted_ball_pos[1] * 0.1])
-                far_post     = np.array([target_sign * 0.9, -predicted_ball_pos[1] * 0.1])
-                penalty_spot = np.array([target_sign * 0.8,  0.0])
-
+            # THAY ĐỔI: Thu hẹp Sigma, Đào sâu Scale để tạo khoảng trống rõ rệt
             goals = [
-                {"position": near_post,    "sigma": 0.15, "scale": -3.0},
-                {"position": far_post,     "sigma": 0.20, "scale": -2.0},
-                {"position": penalty_spot, "sigma": 0.25, "scale": -2.5},
+                {"position": near_post,    "sigma": 0.15, "scale": -0.5},
+                {"position": far_post,     "sigma": 0.20, "scale": -0.3},
+                {"position": penalty_spot, "sigma": 0.25, "scale": -0.4},
             ]
-
-            # Directional Repulsors: đẩy tâm chướng ngại vật theo hướng chạy hậu vệ
-            # [MODULE 2 - FIX 3]: sigma=0.06 giữ kẽ hở phòng ngự
-            k_opp: float = 3.0
-            obstacles = []
-            for j, pos in enumerate(right_team):
-                opp_dir: NDArray[np.float32] = (
-                    right_team_direction[j] if j < len(right_team_direction)
-                    else np.zeros(2, dtype=np.float32)
-                )
-                predicted_opp_pos: NDArray[np.float32] = pos + opp_dir * k_opp
-                obstacles.append({"position": predicted_opp_pos, "sigma": 0.06, "scale": 1.5})
-
-            if not ball_in_flight:
-                predicted_ball_obs: NDArray[np.float32] = ball + ball_direction * k_opp
-                obstacles.append({"position": predicted_ball_obs, "sigma": 0.15, "scale": 2.5})
+            # THAY ĐỔI: Thu hẹp Sigma của hậu vệ để Agent có kẽ hở luồn lách
+            # obstacles = [
+            #     {"position": pos, "sigma": 0.06, "scale": 0.2} for pos in right_team
+            # ]
+            obstacles = [{"position": ball, "sigma": 0.25, "scale": 0.5}]
 
         else:
-            k_ball = 5.0
-            predicted_ball_pos = ball + ball_direction * k_ball
-            goals = [{"position": predicted_ball_pos, "sigma": 0.25, "scale": -2.0}]
-
-            k_opp = 3.0
-            obstacles = []
-            for j, pos in enumerate(right_team):
-                opp_dir = (
-                    right_team_direction[j] if j < len(right_team_direction)
-                    else np.zeros(2, dtype=np.float32)
-                )
-                predicted_opp_pos = pos + opp_dir * k_opp
-                obstacles.append({"position": predicted_opp_pos, "sigma": 0.06, "scale": 1.2})
+            goals = [{"position": ball, "sigma": 0.25, "scale": -2.5}]
+            obstacles = [{"position": pos, "sigma": 0.06, "scale": -0.1} for pos in right_team]
 
         return left_team, right_team, ball, goals, obstacles
 
@@ -604,6 +626,7 @@ class GFootballLocalWrapper(gym.Wrapper):
         NDArray[np.float32],  # obs_l   (11, 32)
         NDArray[np.float32],  # shaped_rewards (11,)
         bool,                 # done
+        dict,                 # reward_info — các phần thưởng thành phần (sum theo agent)
     ]:
         """
         Bước khi ít nhất một GAgent chọn STOP.
@@ -832,4 +855,17 @@ class GFootballLocalWrapper(gym.Wrapper):
 
         self.last_raw_obs = raw_obs
         state, obs_g, obs_l = self._get_all_obses_and_state(raw_obs)
-        return state, obs_g, obs_l, shaped_rewards, done
+
+        # ── Tổng hợp các phần thưởng thành phần (sum trên tất cả agent) ──────
+        reward_info: dict = {
+            'R_env':        float(np.sum(rewards_env)),
+            'R_passing':    float(np.sum(rewards_passing)),
+            'R_facing':     float(np.sum(rewards_facing)),
+            'R_in_box':     float(np.sum(rewards_in_box)),
+            'R_assist':     float(np.sum(rewards_assist)),
+            'R_role':       float(np.sum(rewards_role)),
+            'R_approach':   float(np.sum(rewards_approach)),
+            'R_possession': float(np.sum(rewards_possession)),
+        }
+
+        return state, obs_g, obs_l, shaped_rewards, done, reward_info

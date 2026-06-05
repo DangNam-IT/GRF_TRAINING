@@ -68,18 +68,17 @@ class GFootballGlobalWrapper(gym.Wrapper):
         left_team: NDArray[np.float32] = np.array(base_obs["left_team"])
         right_team: NDArray[np.float32] = np.array(base_obs["right_team"])
         ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
+        is_corner_kick: bool = (
+            abs(abs(ball[0]) - 1.0) < 0.05 and abs(abs(ball[1]) - 0.42) < 0.05
+        )
+
+
         # ball_z: float = float(base_obs["ball"][2])  # chiều cao bóng (z-coordinate)
 
         # [MODULE 2 - FIX 2]: Phát hiện bóng đang bay bổng (ball in flight)
         # Khi bóng bay bổng (z > 0.08m), KHÔNG nhân velocity vì sẽ đẩy
         # attractor ra ngoài sân. Khóa cứng vào Landing Zone cố định.
         # ball_in_flight: bool = ball_z > 0.08
-
-        base_obs = raw_obs[0]
-        ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
-        is_corner_kick: bool = (
-            abs(abs(ball[0]) - 1.0) < 0.05 and abs(abs(ball[1]) - 0.42) < 0.05
-        )
 
         # # game_mode == 4 là trạng thái đặt bóng chết ở góc sân của GRF
         # is_set_piece_corner: bool = (base_obs.get("game_mode", -1) == 4)
