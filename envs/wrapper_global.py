@@ -35,7 +35,7 @@ class GFootballGlobalWrapper(gym.Wrapper):
         
         self.state_dim: int = 46   # left(22) + right(22) + ball(2)
         # obs_dim = rays(32) + energy(1) + ball_owned(1) + sticky_actions(10) + role(10) = 54
-        self.obs_dim: int = 54   
+        self.obs_dim: int = 54
 
         self.last_raw_obs: Optional[RawObs] = None
         self.last_energy_fields: Optional[NDArray[np.float32]] = None
@@ -69,14 +69,6 @@ class GFootballGlobalWrapper(gym.Wrapper):
         right_team: NDArray[np.float32] = np.array(base_obs["right_team"])
         ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
         # ball_z: float = float(base_obs["ball"][2])  # chiều cao bóng (z-coordinate)
-
-        # [MODULE 2 - FIX 0]: Dùng key 'ball_direction' riêng (theo observation.md)
-        # ball_direction là [vx, vy, vz] — chỉ lấy 2 thành phần x,y mặt đất
-        # ball_dir_raw = base_obs.get("ball_direction", [0.0, 0.0, 0.0])
-        # ball_direction: NDArray[np.float32] = np.array(ball_dir_raw[:2], dtype=np.float32)
-
-        # right_team_direction_raw = base_obs.get("right_team_direction", [[0.0, 0.0]] * len(right_team))
-        # right_team_direction: NDArray[np.float32] = np.array(right_team_direction_raw, dtype=np.float32)
 
         # [MODULE 2 - FIX 2]: Phát hiện bóng đang bay bổng (ball in flight)
         # Khi bóng bay bổng (z > 0.08m), KHÔNG nhân velocity vì sẽ đẩy
@@ -149,6 +141,7 @@ class GFootballGlobalWrapper(gym.Wrapper):
         #         )
         #         predicted_opp_pos = pos + opp_dir * k_opp
         #         obstacles.append({"position": predicted_opp_pos, "sigma": 0.06, "scale": 0.3})
+        obstacles = []
 
         if is_corner_kick:
             target_sign:  float = 1.0 if ball[0] > 0 else -1.0
@@ -163,15 +156,15 @@ class GFootballGlobalWrapper(gym.Wrapper):
                 {"position": penalty_spot, "sigma": 0.25, "scale": -0.4},
             ]
             # THAY ĐỔI: Thu hẹp Sigma của hậu vệ để Agent có kẽ hở luồn lách
-            obstacles = [
-                {"position": pos, "sigma": 0.06, "scale": 0.2} for pos in right_team
-            ]
-            obstacles.append({"position": ball, "sigma": 0.25, "scale": 0.5})
+            # obstacles = [
+            #     {"position": pos, "sigma": 0.06, "scale": 0.2} for pos in right_team
+            # ]
+            obstacles = [{"position": ball, "sigma": 0.25, "scale": 0.5}]
 
         else:
             goals = [{"position": ball, "sigma": 0.25, "scale": -2.5}]
-            obstacles = [{"position": pos, "sigma": 0.06, "scale": 0.2} for pos in right_team]
-
+            # obstacles = [{"position": pos, "sigma": 0.06, "scale": 0.2} for pos in right_team]
+        
         return left_team, goals, obstacles
 
     # =========================================================================
@@ -423,6 +416,12 @@ class GFootballGlobalWrapper(gym.Wrapper):
 
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
         base_obs = raw_obs[0] if raw_obs is not None else None
+        # Tìm 5 cầu thủ đội nhà gần khung thành đối phương nhất (nhóm tấn công chủ chốt)
+        left_team = np.array(raw_obs[0]['left_team'])
+        dist_to_goal = np.sum((left_team - np.array([1.0, 0.0]))**2, axis=1)
+        
+        # Bốc ra ID của 5 người gần gôn nhất (trừ thủ môn và kicker)
+        key_attacker_ids = np.argsort(dist_to_goal)[:5]
         
         for i in range(self.num_agents):
             if i == kicker_id:
@@ -435,19 +434,19 @@ class GFootballGlobalWrapper(gym.Wrapper):
                     # PHASE_KICK: Nhấn giữ nút High Pass (action 10) trong nhiều frame.
                     # 1 frame = đường chuyền rất nhẹ (sẽ rơi vào chân người gần nhất).
                     # 4-5 frame = tạt bổng sâu vào trong vòng cấm địa.
-                    mapped_actions[i] = 10
+                    mapped_actions[i] = 9
                     self._kick_frames += 1
                 else:
                     self._has_kicked  = True
                     mapped_actions[i] = 0
-            else:
-                # ĐỐI VỚI 10 CẦU THỦ CHẠY CHỖ: Ánh xạ chuẩn từ không gian [0 -> 9] của mạng nơ-ron
-                # [FIX] Act 0-7 → GRF 1-8 (di chuyển 8 hướng), Act 8-9 → GRF 14 (STAY/release direction)
+            elif i in key_attacker_ids:
                 act = int(agent_actions[i])
                 if 0 <= act < 8:
                     mapped_actions[i] = act + 1   # GRF action 1-8 (8 hướng di chuyển)
                 else:
                     mapped_actions[i] = 14        # GRF 14: release direction → đứng im
+            else:
+                mapped_actions[i] = agent_actions[i]            # Các cầu thủ không chủ chốt khác đứng im
         return mapped_actions
 
     # =========================================================================
@@ -532,22 +531,34 @@ class GFootballGlobalWrapper(gym.Wrapper):
         (vùng mục tiêu) đồng thời tránh xa các "đỉnh năng lượng" (đối thủ).
         """
         rewards_energy: NDArray[np.float32] = (
-            (self.last_energy_fields - energy_fields) * ENERGY_SCALE  # type: ignore[operator]
+            (self.last_energy_fields - energy_fields) * ENERGY_SCALE
         )
 
+
+        # Tìm lại ID của các tiền đạo gần khung thành đối phương (X=1.0) nhất giống như hàm map_actions
+        dist_to_goal = np.sum((left_team - np.array([1.0, 0.0]))**2, axis=1)
+        key_attacker_ids = np.argsort(dist_to_goal)[:5]
+        
+        # Tập hợp danh sách ID của tối đa 5 tác tử chủ chốt
+        key_agent_ids = list(key_attacker_ids)
+        if kicker_id is not None:
+            key_agent_ids.append(kicker_id)
+        key_agent_ids = list(set(key_agent_ids)) # Lọc trùng nếu kicker nằm trong top 5
+        num_key_agents = len(key_agent_ids)
+        
+        # 4. R_possession
         current_ball_owned_team: int = base_obs.get("ball_owned_team", -1)
         current_ball_owned_player: int = base_obs.get("ball_owned_player", -1)
-
-        # 4. R_possession
         rewards_possession: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
         last_ball_owned: int = (
             self.last_raw_obs[0].get("ball_owned_team", -1) if self.last_raw_obs is not None else -1
         )
-        
-        if current_ball_owned_team == 0 and last_ball_owned != 0:
-            rewards_possession[:] = POSSESSION_GAIN / self.num_agents
-        elif current_ball_owned_team == 1 and last_ball_owned != 1:
-            rewards_possession[:] = POSSESSION_LOSS / self.num_agents
+        # Chỉ tính toán và nạp phần thưởng possession vào chỉ số của 5 người chủ chốt
+        if num_key_agents > 0:
+            if current_ball_owned_team == 0 and last_ball_owned != 0:
+                rewards_possession[key_agent_ids] = POSSESSION_GAIN / num_key_agents
+            elif current_ball_owned_team == 1 and last_ball_owned != 1:
+                rewards_possession[key_agent_ids] = POSSESSION_LOSS / num_key_agents
 
 
         rewards_handover: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
@@ -555,18 +566,22 @@ class GFootballGlobalWrapper(gym.Wrapper):
         # vì phạt đồng đội STAY khi không có bóng là sai logic:
         # → Ép TẤT CẢ phải MOVE → không có mục tiêu rõ → chọn hướng energy cao nhất → bầy đàn 1 hướng
         if current_ball_owned_team == 0 and current_ball_owned_player != -1:
-            idx = current_ball_owned_player
-            original_agent_action = int(actions[idx])
-            if original_agent_action >= 8:    # Actor chọn STAY (action 8-9) → đúng, giữ bóng để chuyền
-                rewards_handover[idx] =  0.6
-            elif 0 <= original_agent_action < 8:  # Actor chọn MOVE → phạt vì di chuyển khi đang cầm bóng
-                rewards_handover[idx] = -0.6
+            if current_ball_owned_player in key_agent_ids:
+                idx = current_ball_owned_player
+                original_agent_action = int(actions[idx])
+                if original_agent_action >= 8:    # Actor chọn STAY (action 8-9) → đúng, giữ bóng để chuyền
+                    rewards_handover[idx] =  0.6
+                elif 0 <= original_agent_action < 8:  # Actor chọn MOVE → phạt vì di chuyển khi đang cầm bóng
+                    rewards_handover[idx] = -0.6
         rewards_handover = rewards_handover * HANDOVER_GAIN
+        
+        
         # Tổng hợp và chuẩn hóa [-1.0, 1.0]
         shaped_rewards: NDArray[np.float32] = (
             rewards_env + rewards_energy + rewards_possession + rewards_handover 
         )
-          # Chuẩn hóa riêng để dễ phân tích tác động
+
+        # Chuẩn hóa riêng để dễ phân tích tác động
         shaped_rewards = np.clip(shaped_rewards, -1.0, 1.0)
 
         # ── Cập nhật buffer cho bước kế tiếp ───────────────────────────────
