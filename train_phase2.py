@@ -27,12 +27,13 @@ def parse_args():
     parser.add_argument("--episodes", type=int, default=3000, help="Number of episodes to train")
     parser.add_argument("--max_steps", type=int, default=150, help="Max steps per episode")
     parser.add_argument("--number_agents", type=int, default=11, help="Number of agents in the environment")
-    parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent_model_test2", help="Path to load GAgent model")
-    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent_model_test2", help="Path to save LAgent model")
+    parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent_model", help="Path to load GAgent model")
+    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent_model", help="Path to save LAgent model")
+    parser.add_argument("--eps_model", type=int, default=500, help="Number of episodes between model saves")
     parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
-    parser.add_argument("--save_freq", type=int, default=500, help="Model save frequency")
-    parser.add_argument("--log_file", type=str, default="experiments/phase2_training_test2.csv", help="Path to the log CSV file")
+    parser.add_argument("--save_freq_model", type=int, default=50, help="Model save frequency")
+    parser.add_argument("--log_file", type=str, default="experiments/phase2_train.csv", help="Path to the log CSV file")
     parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2", help="Directory to save videos")
     parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
     return parser.parse_args()
@@ -52,19 +53,14 @@ def main():
         n_agents=args.number_agents
     )
     n_episodes = args.episodes
+    eps_model   = args.eps_model
     max_steps  = args.max_steps
 
 
-    if os.path.exists(model_path + '_ep_' + str(n_episodes) +'.pth'):
-        gagent.load_model(model_path, n_episodes)
+    if os.path.exists(model_path + '_ep_' + str(eps_model) +'.pth'):
+        gagent.load_model(model_path, eps_model)
     else:
         print(f"CẢNH BÁO: Không tìm thấy {model_path}. GAgent chạy với trọng số ngẫu nhiên!")
-
-    # Freeze GAgent hoàn toàn — Phase 2 CHỈ train LAgent
-    for param in gagent.actor.parameters():
-        param.requires_grad = False
-    for param in gagent.critic.parameters():
-        param.requires_grad = False
 
     # ── LAgent: khởi tạo mới, obs_dim = 7 (tactical context) ─────────────────
     lagent = HES_COMA_Agent(
@@ -76,7 +72,18 @@ def main():
     buffer = RolloutBuffer()
     logger = CSVLogger(
         args.log_file,
-        ['Episode', 'Total_Local_Reward']
+        [
+            'Episode',
+            'Total_Local_Reward',
+            'R_env',
+            'R_passing',
+            'R_facing',
+            'R_in_box',
+            'R_assist',
+            'R_role',
+            'R_approach',
+            'R_possession',
+        ]
     )
 
     # ── GAgent "stop" actions — output 8 hoặc 9 → GRF idle ──────────────────
@@ -87,7 +94,16 @@ def main():
     for episode in range(1, n_episodes + 1):
         state, obs_g, obs_l = env.reset()
         buffer.clear()
-        total_reward  = 0.0
+        total_reward = 0.0
+        # Biến tích lũy phần thưởng thành phần theo episode
+        ep_R_env        = 0.0
+        ep_R_passing    = 0.0
+        ep_R_facing     = 0.0
+        ep_R_in_box     = 0.0
+        ep_R_assist     = 0.0
+        ep_R_role       = 0.0
+        ep_R_approach   = 0.0
+        ep_R_possession = 0.0
 
 
         for t in range(max_steps):
@@ -102,7 +118,7 @@ def main():
                 # ── Bước 3a: LAgent quyết định tactical action ───────────────
                 actions_l, _ = lagent.get_actions(obs_l)
 
-                next_state, next_obs_g, next_obs_l, rewards, done = env.step_local(
+                next_state, next_obs_g, next_obs_l, rewards, done, reward_info = env.step_local(
                     actions_l, active_mask, actions_g
                 )
 
@@ -110,6 +126,16 @@ def main():
                 # Buffer lưu (s_t, o_t^l, a_t^l, r_t^l, s_{t+1}, o_{t+1}^l, d)
                 buffer.store(state, obs_l, actions_l, rewards, next_state, next_obs_l, done)
                 total_reward += np.sum(rewards)
+
+                # Tích lũy từng phần thưởng thành phần
+                ep_R_env        += reward_info['R_env']
+                ep_R_passing    += reward_info['R_passing']
+                ep_R_facing     += reward_info['R_facing']
+                ep_R_in_box     += reward_info['R_in_box']
+                ep_R_assist     += reward_info['R_assist']
+                ep_R_role       += reward_info['R_role']
+                ep_R_approach   += reward_info['R_approach']
+                ep_R_possession += reward_info['R_possession']
 
             else:
                 # ── Bước 3b: Tất cả di chuyển → LAgent không hành động ───────
@@ -119,15 +145,29 @@ def main():
             if done:
                 break
 
-        # ── Cập nhật LAgent sau mỗi episode ─────────────────────────────────
+        # ── Cập nhật LAgent sau mỗi episode ───────────────────────────────
         lagent.update(buffer)
 
-        logger.log([episode, total_reward])
+        logger.log([
+            episode,
+            total_reward,
+            ep_R_env,
+            ep_R_passing,
+            ep_R_facing,
+            ep_R_in_box,
+            ep_R_assist,
+            ep_R_role,
+            ep_R_approach,
+            ep_R_possession,
+        ])
         print(f"Episode: {episode:4d}/{n_episodes} | "
-            #   f"Steps_Local: {steps_local:3d} | "
-              f"Reward: {total_reward:.3f}")
+              f"Reward: {total_reward:.3f} | "
+              f"env={ep_R_env:.2f} pass={ep_R_passing:.2f} "
+              f"face={ep_R_facing:.2f} box={ep_R_in_box:.2f} "
+              f"asst={ep_R_assist:.2f} role={ep_R_role:.2f} "
+              f"appr={ep_R_approach:.2f} poss={ep_R_possession:.2f}")
 
-        if episode % args.save_freq == 0:
+        if episode % args.save_freq_model == 0:
             # Lưu model định kỳ
             os.makedirs(os.path.dirname(args.lagent_model), exist_ok=True)
             lagent.save_model(args.lagent_model, episode=episode)

@@ -140,6 +140,7 @@ def parse_args():
     parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
     parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent_model", help="Path to load GAgent model")
+    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent_model", help="Path to load LAgent model")
     parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2", help="Directory to save videos")
     parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
     return parser.parse_args()
@@ -152,20 +153,38 @@ def main():
 
     # ── GAgent: tải model đã frozen từ Phase 1 ───────────────────────────────
     model_path = args.gagent_model
+    lmodel_path = args.lagent_model
     gagent = HES_COMA_Agent(
         state_dim=env.state_dim,
         obs_dim=env.obs_dim_g,   # 54 chiều
         n_actions=9,
         n_agents=11
     )
+
+        # ── LAgent: khởi tạo mới, obs_dim = 7 (tactical context) ─────────────────
+    lagent = HES_COMA_Agent(
+        state_dim=env.state_dim,
+        obs_dim=env.obs_dim_l,          # 32 chiều (ray-info)
+        n_actions=env.n_tactic_actions,  # 2 tactical actions
+        n_agents=11
+    )
+
+    buffer = RolloutBuffer()
     n_episodes = args.episodes
     max_steps  = args.max_steps
 
 
     if os.path.exists(model_path + '_ep_' + str(n_episodes) +'.pth'):
         gagent.load_model(model_path, n_episodes)
+        print(f"Tải model GAgent từ {model_path}_ep_{n_episodes}.pth")
     else:
         print(f"CẢNH BÁO: Không tìm thấy {model_path}. GAgent chạy với trọng số ngẫu nhiên!")
+
+    if os.path.exists(lmodel_path + '_ep_' + str(n_episodes) +'.pth'):
+        lagent.load_model(lmodel_path, n_episodes)
+        print(f"Tải model LAgent từ {lmodel_path}_ep_{n_episodes}.pth")
+    else:
+        print(f"CẢNH BÁO: Không tìm thấy {lmodel_path}. LAgent chạy với trọng số ngẫu nhiên!")
 
     # Freeze GAgent hoàn toàn — Phase 2 CHỈ train LAgent
     # for param in gagent.actor.parameters():
@@ -173,14 +192,7 @@ def main():
     # for param in gagent.critic.parameters():
     #     param.requires_grad = False
 
-    # ── LAgent: khởi tạo mới, obs_dim = 7 (tactical context) ─────────────────
-    lagent = HES_COMA_Agent(
-        state_dim=env.state_dim,
-        obs_dim=env.obs_dim_l,          # 32 chiều (ray-info)
-        n_actions=env.n_tactic_actions,  # 2 tactical actions
-        n_agents=11
-    )
-    buffer = RolloutBuffer()
+
     # logger = CSVLogger(
     #     'experiments/phase2_training_test2.csv',
     #     ['Episode', 'Total_Local_Reward']

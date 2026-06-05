@@ -19,7 +19,7 @@ def create_env(args: argparse.Namespace) -> Env:
     """Tạo môi trường GRF cho Phase 1 (không render để tăng tốc training)."""
     return football_env.create_environment(
         env_name="academy_corner",
-        number_of_left_players_agent_controls=args.number_agents,
+        number_of_left_players_agent_controls=11,
         representation="raw",
         rewards="scoring",
         render=args.render,  # Bật render để xem quá trình huấn luyện
@@ -34,11 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_steps", type=int, default=150, help="Max steps per episode")
     parser.add_argument("--render", action="store_true", help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
-    parser.add_argument("--save_freq", type=int, default=100, help="Model save frequency")
+    parser.add_argument("--save_freq_model", type=int, default=50, help="Model save frequency")
     parser.add_argument("--model_path", type=str, default="experiments/models/gagent_model", help="Path to save the model")
     parser.add_argument("--log_file", type=str, default="experiments/phase1_training.csv", help="Path to the log CSV file")
     parser.add_argument("--video_dir", type=str, default="experiments/videos", help="Directory to save videos")
-    parser.add_argument("--dump_freq", type=int, default=500, help="Video dump frequency (0 to disable)")
+    parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
     parser.add_argument("--load_model", type=str, default="", help="Path to load a pre-trained model")
     parser.add_argument("--load_episode", type=int, default=0, help="Episode number of the loaded model")
     parser.add_argument("--number_agents", type=int, default=11, help="Number of agents in the environment")
@@ -122,7 +122,7 @@ def main() -> None:
             f"Possession: {total_possession:.3f} | "
             f"Handover: {total_handover:.3f}"
         )
-        if episode % args.save_freq == 0:
+        if episode % args.save_freq_model == 0:
             os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
             agent.save_model(args.model_path, episode=episode)
     print("Huấn luyện hoàn tất. Đã lưu mô hình GAgent cùng cấu hình môi trường.")
