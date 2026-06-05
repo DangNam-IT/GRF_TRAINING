@@ -18,7 +18,7 @@ class GFootballLocalWrapper(gym.Wrapper):
     Wrapper Phase 2 (Local Spatial Hierarchy) của HES-COMA.
 
     Theo paper:
-    - GAgent (frozen từ Phase 1) quyết định di chuyển (0-7) hoặc STOP (8/9).
+    - GAgent (frozen từ Phase 1) quyết định di chuyển (0-7) hoặc STOP (8).
     - Chỉ khi GAgent chọn STOP, LAgent mới thực thi tactical action.
     - Energy field CHỈ dùng ở global hierarchy → obs_l KHÔNG chứa energy.
     - obs_g = 32 rays + 1 energy = 33 chiều (giữ nguyên chuẩn Phase 1).
@@ -26,8 +26,8 @@ class GFootballLocalWrapper(gym.Wrapper):
     """
 
     # ── Hằng số hành động ──────────────────────────────────────────────────────
-    # GAgent output [0..9]: 0-7 → di chuyển (GRF 1-8), 8-9 → STOP (GRF 0)
-    STOP_ACTIONS: frozenset[int] = frozenset({14})
+    # GAgent output [0..8]: 0-7 → di chuyển (GRF 1-8), 8 → STOP (GRF 14)
+    STOP_ACTIONS: frozenset[int] = frozenset({8})
 
     # LAgent output [0..n_tactic_actions-1] → GRF tactical action
     # 0: Short Pass (11), 1: Shot (12)
@@ -354,6 +354,70 @@ class GFootballLocalWrapper(gym.Wrapper):
         action_map: List[int] = [5, 6, 7, 8, 1, 2, 3, 4]
         return action_map[sector]
 
+    def _get_facing_cosine(
+        self,
+        agent_idx:   int,
+        player_pos:  NDArray[np.float32],   # (2,) vị trí cầu thủ
+        ball_pos:    NDArray[np.float32],   # (2,) vị trí bóng
+        raw_obs_0:   dict,                  # raw_obs[0] — base obs
+    ) -> float:
+        """
+        Tính cos θ giữa hướng mặt cầu thủ (suy ra từ sticky_actions)
+        và vector cầu thủ → bóng.
+
+        sticky_actions[0..7] tương ứng:
+          0=Left(-1,0), 1=TopLeft(-1,-1), 2=Top(0,-1), 3=TopRight(1,-1),
+          4=Right(1,0), 5=BottomRight(1,1), 6=Bottom(0,1), 7=BottomLeft(-1,1)
+        (GRF: y tăng xuống dưới)
+
+        Trả về:
+          cos θ ∈ [-1, 1]  — 1.0 nếu nhìn thẳng vào bóng.
+          0.0              — nếu không giữ phím hướng nào (đứng im).
+        """
+        # 8 direction vectors tương ứng sticky_actions bit 0-7
+        DIR_VECTORS: List[NDArray[np.float32]] = [
+            np.array([-1.0,  0.0]),   # 0: Left
+            np.array([-1.0, -1.0]),   # 1: TopLeft
+            np.array([ 0.0, -1.0]),   # 2: Top
+            np.array([ 1.0, -1.0]),   # 3: TopRight
+            np.array([ 1.0,  0.0]),   # 4: Right
+            np.array([ 1.0,  1.0]),   # 5: BottomRight
+            np.array([ 0.0,  1.0]),   # 6: Bottom
+            np.array([-1.0,  1.0]),   # 7: BottomLeft
+        ]
+        # GRF lưu sticky_actions per-agent trong raw_obs[agent_idx]
+        try:
+            sticky = raw_obs_0.get("left_team_active", None)
+            # sticky_actions nằm trong raw_obs mỗi agent — dùng index trực tiếp
+            agent_obs = self.last_raw_obs[agent_idx] if self.last_raw_obs else None
+            sticky_bits = agent_obs["sticky_actions"] if agent_obs else None
+        except (IndexError, KeyError, TypeError):
+            return 0.0
+
+        if sticky_bits is None:
+            return 0.0
+
+        # Tổng hợp direction vector từ tất cả các bit hướng đang được giữ
+        facing_vec: NDArray[np.float32] = np.zeros(2, dtype=np.float32)
+        for bit_idx in range(8):
+            if sticky_bits[bit_idx]:
+                facing_vec += DIR_VECTORS[bit_idx]
+
+        face_norm: float = float(np.linalg.norm(facing_vec))
+        if face_norm < 1e-6:
+            return 0.0   # Không giữ phím hướng nào → không xác định được mặt
+
+        facing_vec /= face_norm
+
+        # Vector cầu thủ → bóng
+        to_ball: NDArray[np.float32] = ball_pos - player_pos
+        ball_norm: float = float(np.linalg.norm(to_ball))
+        if ball_norm < 1e-6:
+            return 1.0   # Đứng ngay trên bóng → coi như facing
+
+        to_ball /= ball_norm
+        return float(np.dot(facing_vec, to_ball))
+
     # =========================================================================
     # PHẦN 5: ÁNH XẠ HÀNH ĐỘNG
     # =========================================================================
@@ -411,9 +475,12 @@ class GFootballLocalWrapper(gym.Wrapper):
 
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
         base_obs = raw_obs[0] if raw_obs is not None else None
-        ball_owned_team = base_obs.get("ball_owned_team", -1) if base_obs is not None else -1
-        ball_owned_player = base_obs.get("ball_owned_player", -1) if base_obs is not None else -1
+        # Tìm 5 cầu thủ đội nhà gần khung thành đối phương nhất (nhóm tấn công chủ chốt)
+        left_team = np.array(raw_obs[0]['left_team'])
+        dist_to_goal = np.sum((left_team - np.array([1.0, 0.0]))**2, axis=1)
         
+        # Bốc ra ID của 5 người gần gôn nhất (trừ thủ môn và kicker)
+        key_attacker_ids = np.argsort(dist_to_goal)[:5]
         for i in range(self.num_agents):
             if i == kicker_id:
                 if self._aim_frames < self._AIM_DURATION:
@@ -430,13 +497,15 @@ class GFootballLocalWrapper(gym.Wrapper):
                 else:
                     self._has_kicked  = True
                     mapped_actions[i] = 0
-            else:
+            elif i in key_attacker_ids:
                 # ĐỐI VỚI 10 CẦU THỦ CHẠY CHỖ: Ánh xạ chuẩn từ không gian [0 -> 9] của mạng nơ-ron
                 act = int(agent_actions[i])
                 if 0 <= act < 8:
                     mapped_actions[i] = act+1
                 else:
                     mapped_actions[i] = 14  # Lệnh giải phóng phím dính, đứng im rình rập khoảng trống
+            else: 
+                mapped_actions[i] = agent_actions[i]
         return mapped_actions
 
     # =========================================================================
@@ -560,6 +629,14 @@ class GFootballLocalWrapper(gym.Wrapper):
         ROLE_NEAR_POST:    float =  1.0
         ROLE_FAR_POST:     float =  1.0
         ROLE_PENALTY_SPOT: float =  1.5   # Khó hơn → thưởng thêm hệ số khuyến khích
+        # ── Cơ chế chuyền có chủ đích ─────────────────────────────────────────
+        FACING_THRESHOLD:  float =  0.7   # cos θ tối thiểu để pass được coi là "trực diện"
+        BAD_FACING_PENALTY: float = -0.4  # [RL trial-and-error] Phạt pass khi chưa nhìn thẳng bóng
+        # ── Cơ chế ưu tiên sút trong vòng cấm ────────────────────────────────
+        BOX_X_THRESHOLD:   float =  0.83  # GRF pitch x ∈ [-1, 1]
+        BOX_Y_THRESHOLD:   float =  0.20  # GRF pitch |y| ∈ [0, 0.42]
+        SHOT_IN_BOX_R:     float =  1.5   # Thưởng khi sút trong vòng cấm
+        PASS_IN_BOX_P:     float = -0.8   # Phạt khi chuyền trong vòng cấm (mất cơ hội)
 
         # ── Đọc trạng thái trước bước ─────────────────────────────────────────
         last_obs  = self.last_raw_obs[0] if self.last_raw_obs is not None else None
@@ -620,14 +697,14 @@ class GFootballLocalWrapper(gym.Wrapper):
                         mapped_actions[i] = aim_action
                         self._aim_frames += 1
                     elif self._kick_frames < self._KICK_DURATION:
-                        mapped_actions[i] = 10
+                        mapped_actions[i] = 9
                         self._kick_frames += 1
                     else:
                         self._has_kicked  = True
                         mapped_actions[i] = 0
                 else:
-                    act: int = int(local_actions[i])
-                    mapped_actions[i] = act if 0 < act <= 8 else 0
+                    act: int = int(global_actions[i])
+                    mapped_actions[i] = (act + 1) if 0 <= act < 8 else 14
 
         raw_obs, rewards_list, done, info = self.env.step(mapped_actions)
         current_obs = raw_obs[0]
@@ -658,6 +735,52 @@ class GFootballLocalWrapper(gym.Wrapper):
         ):
             rewards_passing[kicker_id] = PASSING_REWARD
             shaped_rewards[kicker_id] += PASSING_REWARD
+
+        # ── R_facing: Phạt chuyền khi chưa "trực diện" bóng (RL trial-and-error) ──
+        # Nguyên lý: Vẫn thực thi action để agent nhận tín hiệu thật từ môi trường,
+        # nhưng cộng thêm reward âm để agent học rằng pass lúc này là sai lầm.
+        # Agent sẽ học: "đợi quay mặt vào bóng (cosθ > 0.7) rồi mới chuyền".
+        rewards_facing: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
+        if last_obs is not None:
+            last_left_team: NDArray[np.float32] = np.array(last_obs["left_team"])
+            last_ball: NDArray[np.float32]       = np.array(last_obs["ball"][:2])
+            for i in range(self.num_agents):
+                # Chỉ kiểm tra agent đang active (LAgent vừa thực thi tactical action)
+                # và đã chọn PASS (local action 0 = TACTIC_MAP[0] = Short Pass GRF 11)
+                if active_mask[i] and int(local_actions[i]) % self.n_tactic_actions == 0:
+                    cos_theta: float = self._get_facing_cosine(
+                        i, last_left_team[i], last_ball, last_obs
+                    )
+                    if cos_theta <= FACING_THRESHOLD:
+                        rewards_facing[i]   = BAD_FACING_PENALTY
+                        shaped_rewards[i]  += BAD_FACING_PENALTY
+
+        # ── R_in_box: Soft reward ưu tiên sút trong vòng cấm ─────────────────
+        # Nếu agent đang cầm bóng VÀ đứng trong vùng nguy hiểm:
+        #   - Chọn Shot (action 1) → thưởng thêm: khuyến khích dứt điểm ngay
+        #   - Chọn Pass (action 0) → phạt thêm: mất cơ hội vàng
+        # Vùng vòng cấm GRF: x > 0.83, |y| < 0.20 (sign theo phía tấn công)
+        rewards_in_box: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
+        if last_obs is not None:
+            last_ball_owned_check: int = last_obs.get("ball_owned_team", -1)
+            last_ball_pos: NDArray[np.float32] = np.array(last_obs["ball"][:2])
+            attack_sign: float = 1.0 if last_ball_pos[0] > 0 else -1.0
+            if last_ball_owned_check == 0 and last_ball_owned_player != -1:
+                idx = last_ball_owned_player
+                player_x: float = float(last_left_team[idx][0])
+                player_y: float = float(last_left_team[idx][1])
+                in_box: bool = (
+                    attack_sign * player_x > BOX_X_THRESHOLD
+                    and abs(player_y) < BOX_Y_THRESHOLD
+                )
+                if in_box and active_mask[idx]:
+                    tactic_chosen: int = int(local_actions[idx]) % self.n_tactic_actions
+                    if tactic_chosen == 1:  # Shot (TACTIC_MAP[1] = GRF 12)
+                        rewards_in_box[idx]  = SHOT_IN_BOX_R
+                        shaped_rewards[idx] += SHOT_IN_BOX_R
+                    elif tactic_chosen == 0:  # Pass (TACTIC_MAP[0] = GRF 11)
+                        rewards_in_box[idx]  = PASS_IN_BOX_P
+                        shaped_rewards[idx] += PASS_IN_BOX_P
 
         # ── R_assist: Kiến tạo dẫn đến bàn thắng (+1.0) ─────────────────────
         rewards_assist: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
