@@ -26,7 +26,7 @@ class HES_COMA_Agent:
         state_dim:  int,
         obs_dim:    int,
         n_actions:  int,
-        n_agents:   int   = 11,
+        n_agents:   int ,
         lr:         float = 5e-4,
         gamma:      float = 0.99,
     ) -> None:
