@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
-/gfootball
 /experiments/videos
+/gfootball
+/light_malib
