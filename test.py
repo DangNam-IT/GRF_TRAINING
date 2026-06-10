@@ -130,19 +130,27 @@ def create_env(args):
         render=args.render,
         write_full_episode_dumps=(args.dump_freq > 0),
         dump_frequency=args.dump_freq if args.dump_freq > 0 else 1,
-        logdir=args.video_dir
+        logdir=args.video_dir,
+        # [builtin_ai] 'action_set' là config key nội bộ — phải truyền qua other_config_options
+        # action_set_v2 = action_set_v1 + [action_builtin_ai=19]
+        other_config_options={'action_set': 'v2'},
     )
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test Phase 2 (LAgent)")
-    parser.add_argument("--episodes", type=int, default=500, help="Number of episodes to train/test")
-    parser.add_argument("--max_steps", type=int, default=150, help="Max steps per episode")
-    parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
-    parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
-    parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent_model", help="Path to load GAgent model")
-    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent_model", help="Path to load LAgent model")
-    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2", help="Directory to save videos")
-    parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
+    parser.add_argument("--g_eps",     type=int,   default=500,                               help="Số episodes chạy global agent")
+    parser.add_argument("--l_eps",     type=int,   default=500,                               help="Số episodes chạy local agent")
+    parser.add_argument("--max_steps",   type=int,   default=150,                               help="Bước tối đa mỗi episode")
+    parser.add_argument("--render",      action="store_true",  default=True,                    help="Bật render")
+    parser.add_argument("--no_render",   action="store_false", dest="render",                   help="Tắt render")
+    parser.add_argument("--g_model",type=str,   default="experiments/models/gagent/g_model",help="Đường dẫn model GAgent")
+    parser.add_argument("--l_model",type=str,   default="experiments/models/lagent/l_model",help="Đường dẫn model LAgent")
+    parser.add_argument("--video_dir",   type=str,   default="experiments/videos/phase2/test",        help="Thư mục video")
+    parser.add_argument("--dump_freq",   type=int,   default=0,                                 help="Tần suất xuất video (0 = tắt)")
+    # ── Built-in AI exploration ─────────────────────────────────────────────────
+    parser.add_argument("--builtin_eps", type=float, default=0.0,
+        help="Xác suất [0.0–1.0] dùng action_builtin_ai=19 thay vì GAgent. "
+             "0.0 = tắt (chỉ dùng GAgent); 1.0 = chỉ dùng Built-in AI")
     return parser.parse_args()
 
 
@@ -152,108 +160,105 @@ def main():
     env      = GFootballLocalWrapper(base_env, num_agents=11)
 
     # ── GAgent: tải model đã frozen từ Phase 1 ───────────────────────────────
-    model_path = args.gagent_model
-    lmodel_path = args.lagent_model
+    model_path  = args.g_model
+    lmodel_path = args.l_model
+
     gagent = HES_COMA_Agent(
         state_dim=env.state_dim,
-        obs_dim=env.obs_dim_g,   # 54 chiều
-        n_actions=9,
+        obs_dim=env.obs_dim_g,
+        n_actions=10,
         n_agents=11
     )
 
-        # ── LAgent: khởi tạo mới, obs_dim = 7 (tactical context) ─────────────────
+    # ── LAgent ────────────────────────────────────────────────────────
     lagent = HES_COMA_Agent(
         state_dim=env.state_dim,
-        obs_dim=env.obs_dim_l,          # 32 chiều (ray-info)
-        n_actions=env.n_tactic_actions,  # 2 tactical actions
+        obs_dim=env.obs_dim_l,
+        n_actions=env.n_tactic_actions,
         n_agents=11
     )
 
-    buffer = RolloutBuffer()
-    n_episodes = args.episodes
+    # Inference mode — không cần gradient
+    gagent.actor.eval()
+    gagent.critic.eval()
+    lagent.actor.eval()
+    lagent.critic.eval()
+
+    n_episodes = args.g_eps
+    m_episodes = args.l_eps
     max_steps  = args.max_steps
+    builtin_eps: float = args.builtin_eps   # Xác suất dùng Built-in AI
 
-
-    if os.path.exists(model_path + '_ep_' + str(n_episodes) +'.pth'):
+    # ── Load models ───────────────────────────────────────────────────
+    if os.path.exists(model_path + '_ep_' + str(n_episodes) + '.pth'):
         gagent.load_model(model_path, n_episodes)
-        print(f"Tải model GAgent từ {model_path}_ep_{n_episodes}.pth")
+        print(f"[GAgent] Đã tải: {model_path}_ep_{n_episodes}.pth")
     else:
-        print(f"CẢNH BÁO: Không tìm thấy {model_path}. GAgent chạy với trọng số ngẫu nhiên!")
+        print(f"[GAgent] CẢNH BÁO: Không tìm thấy model global → chạy với trọng số ngẫu nhiên")
 
-    if os.path.exists(lmodel_path + '_ep_' + str(n_episodes) +'.pth'):
-        lagent.load_model(lmodel_path, n_episodes)
-        print(f"Tải model LAgent từ {lmodel_path}_ep_{n_episodes}.pth")
+    if os.path.exists(lmodel_path + '_ep_' + str(m_episodes) + '.pth'):
+        lagent.load_model(lmodel_path, m_episodes)
+        print(f"[LAgent] Đã tải: {lmodel_path}_ep_{m_episodes}.pth")
     else:
-        print(f"CẢNH BÁO: Không tìm thấy {lmodel_path}. LAgent chạy với trọng số ngẫu nhiên!")
+        print(f"[LAgent] CẢNH BÁO: Không tìm thấy model local → chạy với trọng số ngẫu nhiên")
 
-    # Freeze GAgent hoàn toàn — Phase 2 CHỈ train LAgent
-    # for param in gagent.actor.parameters():
-    #     param.requires_grad = False
-    # for param in gagent.critic.parameters():
-    #     param.requires_grad = False
+    STOP_ACTIONS        = set(env.STOP_ACTIONS)
+    ACTION_BUILTIN_AI   = 19   # V2 action set — đã bật với action_set='v2'
 
+    print(f"\nBắt đầu test | Episodes: {n_episodes} | builtin_eps: {builtin_eps:.0%}")
+    print("-" * 60)
 
-    # logger = CSVLogger(
-    #     'experiments/phase2_training_test2.csv',
-    #     ['Episode', 'Total_Local_Reward']
-    # )
-
-    # ── GAgent "stop" actions — output 8 hoặc 9 → GRF idle ──────────────────
-    # Trong wrapper_global: actions 0-7 → GRF 1-8 (di chuyển), 8-9 → GRF 0, 14 (stop).
-    STOP_ACTIONS = set(env.STOP_ACTIONS)
-
-    print("Bắt đầu huấn luyện Phase 2 (Local Agent)...")
     for episode in range(1, n_episodes + 1):
         state, obs_g, obs_l = env.reset()
-        buffer.clear()
-        total_reward  = 0.0
-
+        total_reward   = 0.0
+        # steps_builtin  = 0   # Số bước dùng Built-in AI
+        # steps_gagent   = 0   # Số bước dùng GAgent thật sự
+        # steps_local    = 0   # Số bước LAgent được kích hoạt
 
         for t in range(max_steps):
-            # ── Bước 1: GAgent (frozen) ra quyết định ────────────────────────
+            # # ── Bước 1: Chọn nguồn hành động cho tất cả 11 agent ─────────
+            # # Epsilon-Greedy: với xác suất builtin_eps → dùng Built-in AI
+            # if builtin_eps > 0.0 and np.random.rand() < builtin_eps:
+            #     # [BUILTIN] Gửi action=19 THẲNG vào GRF engine — KHÔNG qua
+            #     # _map_global_actions (vì hàm đó sẽ map act>=8 → GRF 14)
+            #     grf_actions = np.full(env.num_agents, ACTION_BUILTIN_AI, dtype=np.int64)
+            #     raw_obs_bi, rewards, done, _ = env.env.step(grf_actions)
+            #     env.last_raw_obs = raw_obs_bi
+            #     total_reward += float(np.sum(rewards))
+            #     next_state, next_obs_g, next_obs_l = env._get_all_obses_and_state(raw_obs_bi)
+            #     steps_builtin += 1
+            # else:
+            # [GAGENT] Mạng nơ-ron tự quyết định
             actions_g, _ = gagent.get_actions(obs_g)
-            a = 0
-            # ── Bước 2: Xác định agent nào chọn STOP ─────────────────────────
-            # active_mask[i] = True → GAgent[i] dừng → LAgent[i] được kích hoạt
-            active_mask = np.array([int(a) in STOP_ACTIONS for a in actions_g], dtype=bool)
+            active_mask  = np.array([int(a) in STOP_ACTIONS for a in actions_g], dtype=bool)
+            # steps_gagent += 1
 
             if np.any(active_mask):
-                # ── Bước 3a: LAgent quyết định tactical action ───────────────
+                # ── Bước 2a: LAgent quyết định tactical action ────────
                 actions_l, _ = lagent.get_actions(obs_l)
-
-                next_state, next_obs_g, next_obs_l, rewards, done = env.step_local(
+                next_state, next_obs_g, next_obs_l, rewards, done, _ = env.step_local(
                     actions_l, active_mask, actions_g
                 )
-                a+=1
-
-                # Chỉ lưu vào buffer khi LAgent thực sự active
-                # Buffer lưu (s_t, o_t^l, a_t^l, r_t^l, s_{t+1}, o_{t+1}^l, d)
-                buffer.store(state, obs_l, actions_l, rewards, next_state, next_obs_l, done)
-                total_reward += np.sum(rewards)
-
+                total_reward += float(np.sum(rewards))
+                # steps_local  += 1
             else:
-                # ── Bước 3b: Tất cả di chuyển → LAgent không hành động ───────
+                # ── Bước 2b: Tất cả di chuyển, LAgent không hành động ──
                 next_state, next_obs_g, next_obs_l, _, done = env.step_global(actions_g)
 
             state, obs_g, obs_l = next_state, next_obs_g, next_obs_l
             if done:
                 break
 
-        # ── Cập nhật LAgent sau mỗi episode ─────────────────────────────────
-        lagent.update(buffer)
+        print(
+            f"Ep {episode:4d}/{n_episodes} | "
+            f"Reward: {total_reward:+.3f} | "
+            # f"GAgent: {steps_gagent:3d} steps | "
+            # f"LActive: {steps_local:3d} | "
+            # f"Builtin: {steps_builtin:3d}"
+        )
 
-        # logger.log([episode, total_reward])
-        print(f"Episode: {episode:4d}/{n_episodes} | "
-            #   f"Steps_Local: {steps_local:3d} | "
-              f"Reward: {total_reward:.3f}" 
-              )
-
-        # if episode % 500 == 0:
-        #     # Lưu model định kỳ
-        #     os.makedirs('experiments/models', exist_ok=True)
-        #     lagent.save_model('experiments/models/lagent_model_test2', episode=episode)
-
-    print("Huấn luyện Phase 2 hoàn tất. Model LAgent đã được lưu.")
+    print("-" * 60)
+    print("Test hoàn tất.")
 
 
 if __name__ == '__main__':
