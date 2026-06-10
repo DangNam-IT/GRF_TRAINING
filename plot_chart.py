@@ -49,8 +49,9 @@ import pandas as pd
 # Màu mặc định tuần hoàn khi người dùng không cấu hình thủ công
 # ---------------------------------------------------------------------------
 DEFAULT_COLORS = [
-    '#FF9800', '#9C27B0', '#2196F3', '#4CAF50',
-    '#FF5722', '#00BCD4', '#E91E63', '#8BC34A',
+    '#FF9800', '#9C27B0', "#0F8CF3", "#0E7011",
+    "#AC2F12", '#00BCD4', "#ED427B", '#8BC34A', 
+    "#CDE62D"
 ]
 
 
@@ -100,7 +101,7 @@ def load_csv(csv_path: str, columns: list[str] | None, frames: int | None) -> pd
 # Normalization modes
 # ---------------------------------------------------------------------------
 
-def _norm_minmax(series: pd.Series, col: str) -> pd.Series:
+def _norm_minmax(series: pd.Series, col: str, **kwargs) -> pd.Series:
     """Min-Max → [0, 100%]. Toàn bộ dải giá trị được ánh xạ tuyến tính."""
     col_min, col_max = series.min(), series.max()
     if col_max == col_min:
@@ -111,7 +112,7 @@ def _norm_minmax(series: pd.Series, col: str) -> pd.Series:
     return result
 
 
-def _norm_zscore(series: pd.Series, col: str) -> pd.Series:
+def _norm_zscore(series: pd.Series, col: str, **kwargs) -> pd.Series:
     """Z-score → (x - mean) / std. Giá trị = 0 là trung bình, ±1 là 1 độ lệch chuẩn."""
     mean, std = series.mean(), series.std()
     if std == 0:
@@ -122,7 +123,7 @@ def _norm_zscore(series: pd.Series, col: str) -> pd.Series:
     return result
 
 
-def _norm_baseline(series: pd.Series, col: str) -> pd.Series:
+def _norm_baseline(series: pd.Series, col: str, **kwargs) -> pd.Series:
     """% so với baseline — điểm đầu tiên hợp lệ (khác 0) = 100%."""
     # Tìm giá trị baseline đầu tiên khác 0
     baseline = series.dropna()
@@ -350,7 +351,7 @@ def parse_args():
     )
     parser.add_argument(
         '--save', '-s',
-        default='experiments/figures/chart.png',
+        default='experiments/figures',
         help='Đường dẫn lưu biểu đồ subplot .png (default: experiments/figures/chart.png).',
     )
     parser.add_argument(
