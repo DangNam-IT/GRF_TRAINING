@@ -38,11 +38,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
     parser.add_argument("--save_freq_model", type=int, default=50, help="Model save dump frequency")
-    parser.add_argument("--model_path", type=str, default="experiments/models/gagent/g_model", help="Path to save the model")
-    parser.add_argument("--log_file", type=str, default="experiments/g_train.csv", help="Path to the log CSV file")
-    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase1", help="Directory to save videos")
+    # parser.add_argument("--model_path", type=str, default="experiments/models/gagent/g_model", help="Path to save the model")
+    # parser.add_argument("--log_file", type=str, default="experiments/g_train.csv", help="Path to the log CSV file")
+    # parser.add_argument("--video_dir", type=str, default="experiments/videos/phase1", help="Directory to save videos")
+    # parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
+    # parser.add_argument("--load_model", type=str, default="experiments/models/gagent/g_model", help="Path to load a pre-trained model")
+    # Colab-specific arguments
+    parser.add_argument("--model_path", type=str, default="/content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to save the model")
+    parser.add_argument("--log_file", type=str, default="/content/drive/MyDrive/experiments/g_train.csv", help="Path to the log CSV file")
+    parser.add_argument("--video_dir", type=str, default="/content/drive/MyDrive/experiments/videos/phase1", help="Directory to save videos")
     parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
-    parser.add_argument("--load_model", type=str, default="experiments/models/gagent/g_model", help="Path to load a pre-trained model")
+    parser.add_argument("--load_model", type=str, default="/content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to load a pre-trained model")
     parser.add_argument("--load_episode", type=int, default=0, help="Episode number of the loaded model")
     parser.add_argument("--number_agents", type=int, default=11, help="Number of agents in the environment")
     # ── Built-in AI exploration ─────────────────────────────────────────────────
@@ -140,6 +146,8 @@ def main() -> None:
             f"Handover: {total_handover:.3f}"
             # f" | Steps Built-in: {steps_builtin} | Steps GAgent: {steps_gagent} "
         )
+        
+
         if episode % args.save_freq_model == 0:
             os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
             agent.save_model(args.model_path, episode=episode)
