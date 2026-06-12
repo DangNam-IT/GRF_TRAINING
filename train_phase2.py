@@ -27,25 +27,25 @@ def parse_args():
     parser.add_argument("--eps", type=int, default=3000, help="Number of episodes to train")
     parser.add_argument("--max_steps", type=int, default=150, help="Max steps per episode")
     parser.add_argument("--number_agents", type=int, default=11, help="Number of agents in the environment")
-    # parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent/g_model", help="Path to load GAgent model")
-    # parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent/test6/l_model", help="Path to save LAgent model")
-    # parser.add_argument("--pre_lagent", type=str, default="experiments/models/lagent/test5/l_model", help="Path to load a pre-trained LAgent model")
+    parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent/test1/g_model", help="Path to load GAgent model")
+    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent/test1/l_model", help="Path to save LAgent model")
+    parser.add_argument("--pre_lagent", type=str, default="experiments/models/lagent/test5/l_model", help="Path to load a pre-trained LAgent model")
 
     parser.add_argument("--g_eps",     type=int,   default=500,                               help="Number eps to run global agent")
-    parser.add_argument("--l_eps",     type=int,   default=500,                               help="Number episodes to run local agent")
+    parser.add_argument("--l_eps",     type=int,   default=0,                               help="Number episodes to run local agent")
     parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
-    parser.add_argument("--save_freq_model", type=int, default=50, help="Model save frequency")
-    # parser.add_argument("--log_file", type=str, default="experiments/l_train.csv", help="Path to the log CSV file")
-    # parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2/test6", help="Directory to save videos")
+    parser.add_argument("--save_freq_model", type=int, default=100, help="Model save frequency")
+    parser.add_argument("--log_file", type=str, default="experiments/test1/l_train.csv", help="Path to the log CSV file")
+    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2/test1", help="Directory to save videos")
     parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
 
-    # Colab-specific arguments
-    parser.add_argument("--gagent_model", type=str, default="content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to load GAgent model")
-    parser.add_argument("--lagent_model", type=str, default="content/drive/MyDrive/experiments/models/lagent/test6/l_model", help="Path to save LAgent model")
-    parser.add_argument("--pre_lagent", type=str, default="content/drive/MyDrive/experiments/models/lagent/test5/l_model", help="Path to load a pre-trained LAgent model")
-    parser.add_argument("--log_file", type=str, default="content/drive/MyDrive/experiments/l_train.csv", help="Path to the log CSV file")
-    parser.add_argument("--video_dir", type=str, default="content/drive/MyDrive/experiments/videos/phase2/test6", help="Directory to save videos")
+    # # Colab-specific arguments
+    # parser.add_argument("--gagent_model", type=str, default="content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to load GAgent model")
+    # parser.add_argument("--lagent_model", type=str, default="content/drive/MyDrive/experiments/models/lagent/test6/l_model", help="Path to save LAgent model")
+    # parser.add_argument("--pre_lagent", type=str, default="content/drive/MyDrive/experiments/models/lagent/test5/l_model", help="Path to load a pre-trained LAgent model")
+    # parser.add_argument("--log_file", type=str, default="content/drive/MyDrive/experiments/l_train.csv", help="Path to the log CSV file")
+    # parser.add_argument("--video_dir", type=str, default="content/drive/MyDrive/experiments/videos/phase2/test6", help="Directory to save videos")
     return parser.parse_args()
 
 
@@ -137,32 +137,27 @@ def main():
             # active_mask[i] = True → GAgent[i] dừng → LAgent[i] được kích hoạt
             active_mask = np.array([int(a) in STOP_ACTIONS for a in actions_g], dtype=bool)
 
-            if np.any(active_mask):
-                # ── Bước 3a: LAgent quyết định tactical action ───────────────
-                actions_l, _ = lagent.get_actions(obs_l)
+            # ── Bước 3a: LAgent quyết định tactical action ───────────────
+            actions_l, _ = lagent.get_actions(obs_l)
 
-                next_state, next_obs_g, next_obs_l, rewards, done, reward_info = env.step_local(
-                    actions_l, active_mask, actions_g
-                )
+            next_state, next_obs_g, next_obs_l, rewards, done, reward_info = env.step_local(
+                actions_l, active_mask, actions_g
+            )
 
-                # Chỉ lưu vào buffer khi LAgent thực sự active
-                # Buffer lưu (s_t, o_t^l, a_t^l, r_t^l, s_{t+1}, o_{t+1}^l, d)
-                buffer.store(state, obs_l, actions_l, rewards, next_state, next_obs_l, done)
-                total_reward += np.sum(rewards)
+            # Lưu vào buffer kèm active_mask
+            # Buffer lưu (s_t, o_t^l, a_t^l, r_t^l, s_{t+1}, o_{t+1}^l, d, mask)
+            buffer.store(state, obs_l, actions_l, rewards, next_state, next_obs_l, done, active_mask)
+            total_reward += np.sum(rewards)
 
-                # Tích lũy từng phần thưởng thành phần
-                ep_R_env        += reward_info['R_env']
-                ep_R_passing    += reward_info['R_passing']
-                # ep_R_facing     += reward_info['R_facing']
-                ep_R_in_box     += reward_info['R_in_box']
-                ep_R_assist     += reward_info['R_assist']
-                ep_R_role       += reward_info['R_role']
-                ep_R_approach   += reward_info['R_approach']
-                # ep_R_possession += reward_info['R_possession']
-
-            else:
-                # ── Bước 3b: Tất cả di chuyển → LAgent không hành động ───────
-                next_state, next_obs_g, next_obs_l, _, done = env.step_global(actions_g)
+            # Tích lũy từng phần thưởng thành phần
+            ep_R_env        += reward_info['R_env']
+            ep_R_passing    += reward_info['R_passing']
+            # ep_R_facing     += reward_info['R_facing']
+            ep_R_in_box     += reward_info['R_in_box']
+            ep_R_assist     += reward_info['R_assist']
+            ep_R_role       += reward_info['R_role']
+            ep_R_approach   += reward_info['R_approach']
+            # ep_R_possession += reward_info['R_possession']
 
             state, obs_g, obs_l = next_state, next_obs_g, next_obs_l
             if done:

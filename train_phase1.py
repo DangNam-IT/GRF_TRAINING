@@ -37,19 +37,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_steps", type=int, default=150, help="Max steps per episode")
     parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
-    parser.add_argument("--save_freq_model", type=int, default=50, help="Model save dump frequency")
-    # parser.add_argument("--model_path", type=str, default="experiments/models/gagent/g_model", help="Path to save the model")
-    # parser.add_argument("--log_file", type=str, default="experiments/g_train.csv", help="Path to the log CSV file")
-    # parser.add_argument("--video_dir", type=str, default="experiments/videos/phase1", help="Directory to save videos")
-    # parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
-    # parser.add_argument("--load_model", type=str, default="experiments/models/gagent/g_model", help="Path to load a pre-trained model")
-    # Colab-specific arguments
-    parser.add_argument("--model_path", type=str, default="/content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to save the model")
-    parser.add_argument("--log_file", type=str, default="/content/drive/MyDrive/experiments/g_train.csv", help="Path to the log CSV file")
-    parser.add_argument("--video_dir", type=str, default="/content/drive/MyDrive/experiments/videos/phase1", help="Directory to save videos")
+    parser.add_argument("--save_freq_model", type=int, default=100, help="Model save dump frequency")
+    parser.add_argument("--model_path", type=str, default="experiments/models/gagent/test1/g_model", help="Path to save the model")
+    parser.add_argument("--log_file", type=str, default="experiments/test1/g_train.csv", help="Path to the log CSV file")
+    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase1/test1", help="Directory to save videos")
     parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
-    parser.add_argument("--load_model", type=str, default="/content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to load a pre-trained model")
-    parser.add_argument("--load_episode", type=int, default=0, help="Episode number of the loaded model")
+    parser.add_argument("--load_model", type=str, default="experiments/models/gagent/test1/g_model", help="Path to load a pre-trained model")
+    # # Colab-specific arguments
+    # parser.add_argument("--model_path", type=str, default="/content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to save the model")
+    # parser.add_argument("--log_file", type=str, default="/content/drive/MyDrive/experiments/g_train.csv", help="Path to the log CSV file")
+    # parser.add_argument("--video_dir", type=str, default="/content/drive/MyDrive/experiments/videos/phase1", help="Directory to save videos")
+    # parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
+    # parser.add_argument("--load_model", type=str, default="/content/drive/MyDrive/experiments/models/gagent/g_model", help="Path to load a pre-trained model")
+    parser.add_argument("--load_eps", type=int, default=0, help="Episode number of the loaded model")
     parser.add_argument("--number_agents", type=int, default=11, help="Number of agents in the environment")
     # ── Built-in AI exploration ─────────────────────────────────────────────────
     parser.add_argument("--builtin_eps", type=float, default=0.0,
@@ -69,17 +69,18 @@ def main() -> None:
         n_agents=args.number_agents,
     )
     
-    if args.load_model != "" and args.load_episode > 0:
-        agent.load_model(args.load_model, episode=args.load_episode)
+    if args.load_model != "" and args.load_eps > 0:
+        agent.load_model(args.load_model, episode=args.load_eps)
+        print(f"Đã tải model từ: {args.load_model} | Episode: {args.load_eps}")
     
     buffer: RolloutBuffer = RolloutBuffer()
     logger: CSVLogger     = CSVLogger(
         args.log_file,
         [
             "Episode", 
-            "Reward_total",
-            "Reward_energy",
-            "Reward_handover"
+            "R_total",
+            "R_energy",
+            "R_handover"
         ],
     )
 
@@ -130,8 +131,8 @@ def main() -> None:
             buffer.store(state, obses, actions, rewards, next_state, next_obses, done)
 
             total_reward     += float(np.sum(rewards))
-            total_energy     += float(np.sum(rewards_view["rewards_energy"]))
-            total_handover   += float(np.sum(rewards_view["rewards_handover"]))
+            total_energy     += float(np.sum(rewards_view["r_energy"]))
+            total_handover   += float(np.sum(rewards_view["r_handover"]))
             
             state, obses = next_state, next_obses
             if done:

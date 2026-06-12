@@ -22,6 +22,7 @@ class RolloutBuffer:
         self.next_states:  list[NDArray[np.float32]] = []
         self.next_obses:   list[NDArray[np.float32]] = []  # o_{t+1} cho TD-target
         self.dones:        list[bool]                = []
+        self.active_masks: list[NDArray[np.bool_]]   = []
 
     def store(
         self,
@@ -32,8 +33,9 @@ class RolloutBuffer:
         next_state:  NDArray[np.float32],
         next_obses:  NDArray[np.float32],
         done:        bool,
+        active_mask: NDArray[np.bool_] = None,
     ) -> None:
-        """Lưu trữ transition (s_t, o_t, a_t, r_t, s_{t+1}, o_{t+1}, d) cho 11 agents."""
+        """Lưu trữ transition (s_t, o_t, a_t, r_t, s_{t+1}, o_{t+1}, d, mask) cho 11 agents."""
         self.states.append(state)
         self.obses.append(obses)
         self.actions.append(actions)
@@ -41,6 +43,10 @@ class RolloutBuffer:
         self.next_states.append(next_state)
         self.next_obses.append(next_obses)
         self.dones.append(done)
+        if active_mask is not None:
+            self.active_masks.append(active_mask)
+        else:
+            self.active_masks.append(np.ones_like(rewards, dtype=bool))
 
     def clear(self) -> None:
         """Xóa toàn bộ dữ liệu trong buffer."""
@@ -51,6 +57,7 @@ class RolloutBuffer:
         self.next_states.clear()
         self.next_obses.clear()
         self.dones.clear()
+        self.active_masks.clear()
 
     def get_data(self) -> Tuple[
         NDArray[np.float32],  # states        (T, state_dim)
@@ -59,8 +66,10 @@ class RolloutBuffer:
         NDArray[np.float32],  # rewards       (T, n_agents)
         NDArray[np.float32],  # next_states   (T, state_dim)
         NDArray[np.float32],  # next_obses    (T, n_agents, obs_dim)
-        NDArray[np.float32],  # dones         (T,)
+        NDArray[np.bool_],    # dones         (T,)
+        NDArray[np.bool_],    # active_masks  (T, n_agents)
     ]:
+        """Trả về toàn bộ batch dữ liệu và chuyển thành mảng numpy."""
         return (
             np.array(self.states,      dtype=np.float32),
             np.array(self.obses,       dtype=np.float32),
@@ -68,5 +77,6 @@ class RolloutBuffer:
             np.array(self.rewards,     dtype=np.float32),
             np.array(self.next_states, dtype=np.float32),
             np.array(self.next_obses,  dtype=np.float32),
-            np.array(self.dones,       dtype=np.float32),
+            np.array(self.dones,       dtype=np.bool_),
+            np.array(self.active_masks, dtype=np.bool_),
         )

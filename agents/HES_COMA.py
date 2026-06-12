@@ -79,7 +79,7 @@ class HES_COMA_Agent:
         Args:
             buffer: RolloutBuffer chứa dữ liệu episode.
         """
-        states_np, obses_np, actions_np, rewards_np, next_states_np, next_obses_np, dones_np = buffer.get_data()
+        states_np, obses_np, actions_np, rewards_np, next_states_np, next_obses_np, dones_np, active_masks_np = buffer.get_data()
         if len(states_np) == 0:
             # [MODULE 1 - FIX 3]: Giải phóng bộ đệm ngay cả khi buffer rỗng
             buffer.clear()
@@ -93,6 +93,7 @@ class HES_COMA_Agent:
         next_states:  Tensor = torch.FloatTensor(next_states_np).to(self.device)   # (T, state_dim)
         next_obses:   Tensor = torch.FloatTensor(next_obses_np).to(self.device)    # (T, n_agents, obs_dim)
         dones:        Tensor = torch.FloatTensor(dones_np).unsqueeze(1).to(self.device)  # (T, 1)
+        active_masks: Tensor = torch.FloatTensor(active_masks_np).to(self.device)        # (T, n_agents)
 
         batch_size: int = states.size(0)
 
@@ -143,7 +144,8 @@ class HES_COMA_Agent:
         critic_loss_per_agent: Tensor = F.mse_loss(
             q_values, td_target.detach(), reduction='none'
         )                                                     # (T, n_agents)
-        critic_loss: Tensor = critic_loss_per_agent.mean()   # scalar — mean theo batch
+        # Lọc loss bằng active_mask
+        critic_loss: Tensor = (critic_loss_per_agent * active_masks).sum() / (active_masks.sum() + 1e-8)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
@@ -164,8 +166,8 @@ class HES_COMA_Agent:
         beta_entropy:  float  = 0.01
 
         # mean() theo batch+agent để tổng hợp gradient — advantage per-agent
-        # đã được bảo toàn từ bước tính riêng rẽ ở trên.
-        actor_loss: Tensor = -(log_probs * advantage + beta_entropy * entropy_bonus).mean()
+        # đã được bảo toàn từ bước tính riêng rẽ ở trên. Lọc bằng active_mask!
+        actor_loss: Tensor = - ((log_probs * advantage + beta_entropy * entropy_bonus) * active_masks).sum() / (active_masks.sum() + 1e-8)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)  # [FIX] Gradient clipping

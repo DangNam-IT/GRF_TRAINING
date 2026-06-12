@@ -86,37 +86,23 @@ class GFootballLocalWrapper(gym.Wrapper):
         )
         obstacles = []
 
-        if is_corner_kick:
-            target_sign:  float = 1.0 if ball[0] > 0 else -1.0
-            near_post:    NDArray[np.float32] = np.array([target_sign * 0.9,  ball[1] * 0.1])
-            far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -ball[1] * 0.1])
-            penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
 
-            # THAY ĐỔI: Thu hẹp Sigma, Đào sâu Scale để tạo khoảng trống rõ rệt
-            goals = [
-                {"position": near_post,    "sigma": 0.15, "scale": -0.5},
-                {"position": far_post,     "sigma": 0.20, "scale": -0.3},
-                {"position": penalty_spot, "sigma": 0.25, "scale": -0.4},
-            ]
-            # THAY ĐỔI: Thu hẹp Sigma của hậu vệ để Agent có kẽ hở luồn lách
-            obstacles = [
-                {"position": pos, "sigma": 0.06, "scale": 0.2} for pos in right_team
-            ]
-            obstacles = [{"position": ball, "sigma": 0.25, "scale": 0.5}]
+        target_sign:  float = 1.0 if ball[0] > 0 else -1.0
+        near_post:    NDArray[np.float32] = np.array([target_sign * 0.9,  ball[1] * 0.1])
+        far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -ball[1] * 0.1])
+        penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
 
-        else:
-            # Ngoài corner kick: dùng vùng nguy hiểm cố định quanh khung thành đối phương
-            # Không dùng bóng làm goal — mirror wrapper_global (tránh kéo cầu thủ về phía bóng)
-            target_sign: float = 1.0  # Đội trái tấn công về phải (x=+1)
-            near_post    = np.array([target_sign * 0.90,  0.05], dtype=np.float32)
-            far_post     = np.array([target_sign * 0.90, -0.05], dtype=np.float32)
-            penalty_spot = np.array([target_sign * 0.80,  0.00], dtype=np.float32)
-            goals = [
-                {"position": near_post,    "sigma": 0.15, "scale": -0.5},
-                {"position": far_post,     "sigma": 0.15, "scale": -0.5},
-                {"position": penalty_spot, "sigma": 0.25, "scale": -0.4},
-            ]
-
+        # THAY ĐỔI: Thu hẹp Sigma, Đào sâu Scale để tạo khoảng trống rõ rệt
+        goals = [
+            {"position": near_post,    "sigma": 0.3, "scale": -2.0},
+            {"position": far_post,     "sigma": 0.3, "scale": -1.5},
+            {"position": penalty_spot, "sigma": 0.6, "scale": -2.5},
+        ]
+        # THAY ĐỔI: Thu hẹp Sigma của hậu vệ để Agent có kẽ hở luồn lách
+        obstacles = []
+        for pos in right_team:
+            obstacles.append({"position": pos, "sigma": 0.05, "scale": 0.1})
+        obstacles.append({"position": ball, "sigma": 0.25, "scale": 0.1})
         return left_team, right_team, ball, goals, obstacles
 
     # =========================================================================
@@ -129,7 +115,7 @@ class GFootballLocalWrapper(gym.Wrapper):
         left_team:    NDArray[np.float32],
         right_team:   NDArray[np.float32],
         targets:      list[NDArray[np.float32]],   # [near_post, far_post, penalty_spot]
-        max_distance: float = 1.0,
+        max_distance: float = 0.3,
     ) -> NDArray[np.float32]:
         """
         16 hướng × 3 kênh → (48,) normalized [0, 1].
@@ -297,16 +283,13 @@ class GFootballLocalWrapper(gym.Wrapper):
         # Bốc ra ID của 5 người gần gôn nhất (trừ thủ môn và kicker)
         key_attacker_ids = np.argsort(dist_to_goal)[:5]
         for i in range(self.num_agents):
-            if i in key_attacker_ids or i == kicker_id:
-                act = agent_actions[i]
-                if 0 < act <= 8:
-                    mapped_actions[i] = act   # GRF action 1-8 (8 hướng di chuyển)
-                elif act == 0:
-                    mapped_actions[i] = 0
-                else:
-                    mapped_actions[i] = 14     # GRF 14: release direction → đứng im
+            act = agent_actions[i]
+            if 0 < act <= 8:
+                mapped_actions[i] = act   # GRF action 1-8 (8 hướng di chuyển)
+            elif act == 0:
+                mapped_actions[i] = 0
             else:
-                mapped_actions[i] = 0  
+                mapped_actions[i] = 14     # GRF 14: release direction → đứng im
         return mapped_actions
 
     # =========================================================================
@@ -451,9 +434,9 @@ class GFootballLocalWrapper(gym.Wrapper):
         # Xác định kicker qua hàm chuẩn, không hardcode
         kicker_id: Optional[int] = 1
         # Tìm 5 cầu thủ đội nhà gần khung thành đối phương nhất (nhóm tấn công chủ chốt)
-        left_team_last = np.array(last_obs['left_team'])
-        dist_to_goal = np.sum((left_team_last - np.array([1.0, 0.0]))**2, axis=1)
-        key_attacker_ids = np.argsort(dist_to_goal)[:5]
+        # left_team_last = np.array(last_obs['left_team'])
+        # dist_to_goal = np.sum((left_team_last - np.array([1.0, 0.0]))**2, axis=1)
+        # key_attacker_ids = np.argsort(dist_to_goal)[:5]
         # ── Ánh xạ hành động ─────────────────────────────────────────────────
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
         for i in range(self.num_agents):
@@ -462,15 +445,15 @@ class GFootballLocalWrapper(gym.Wrapper):
                 mapped_actions[i] = self.TACTIC_MAP[tactic_idx]
             else:
                 act = global_actions[i]
-                if i in key_attacker_ids or i == 1:
-                    if 0 < act <= 8:
-                        mapped_actions[i] = act   # GRF action 1-8 (8 hướng di chuyển)
-                    elif act == 0:
-                        mapped_actions[i] = 0
-                    else:
-                        mapped_actions[i] = 14     # GRF 14: release direction → đứng im
+                # if i in key_attacker_ids or i == 1:
+                if 0 < act <= 8:
+                    mapped_actions[i] = act   # GRF action 1-8 (8 hướng di chuyển)
+                elif act == 0:
+                    mapped_actions[i] = 0
                 else:
-                    mapped_actions[i] = 0 
+                    mapped_actions[i] = 14     # GRF 14: release direction → đứng im
+                # else:
+                #     mapped_actions[i] = 0 
 
         raw_obs, rewards_list, done, info = self.env.step(mapped_actions)
         current_obs = raw_obs[0]
@@ -489,14 +472,25 @@ class GFootballLocalWrapper(gym.Wrapper):
         left_team:     NDArray[np.float32]   = np.array(current_obs["left_team"])
 
         # ── R_passing: Đánh giá chất lượng đường chuyền của Kicker ───────────
-        # Điều kiện: kicker_id đã được đặt, và quyền sở hữu bóng chuyển sang
-        # đồng đội khác (ball_owned_team=0, ball_owned_player != kicker_id).
         rewards_passing: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
+
+        # 1. Thưởng Ý Định (Intent Reward): Ép Kicker chọn High Pass
+        if kicker_id is not None and active_mask[kicker_id] and last_ball_owned_player == kicker_id:
+            kicker_tactic = int(local_actions[kicker_id]) % self.n_tactic_actions
+            # TACTIC_MAP = [9 (long), 10 (high), 11 (short), 12 (shot)]
+            if kicker_tactic == 1:   # high_pass
+                rewards_passing[kicker_id] += 1.0
+                shaped_rewards[kicker_id] += 1.0
+            else:                    # short_pass, long_pass, shot
+                rewards_passing[kicker_id] -= 1.0 
+                shaped_rewards[kicker_id] -= 1.0
+
+        # 2. Thưởng Kết Quả (Outcome Reward): Bóng đến vùng nguy hiểm
         if (
             kicker_id is not None
-            and last_ball_owned == 0          # trước chưa phải đội ta sở hữu
             and current_ball_owned == 0       # sau đội ta có bóng
             and current_ball_owned_player != kicker_id  # người khác nhận
+            and last_ball_owned_player != current_ball_owned_player # vừa mới nhận bóng ở step này
         ):
             receiver_idx = current_ball_owned_player
             receiver_x = float(left_team[receiver_idx][0])
@@ -508,15 +502,15 @@ class GFootballLocalWrapper(gym.Wrapper):
             
             if rx_eval > DANGER_ZONE_X and abs(receiver_y) < DANGER_ZONE_Y:
                 # [Tốt] Chuyền vào vùng nguy hiểm
-                rewards_passing[kicker_id] = PASSING_REWARD
+                rewards_passing[kicker_id] += PASSING_REWARD
                 shaped_rewards[kicker_id] += PASSING_REWARD
             elif rx_eval < 0.0:
                 # [Tồi] Chuyền về sân nhà
-                rewards_passing[kicker_id] = BACKPASS_PENALTY
+                rewards_passing[kicker_id] += BACKPASS_PENALTY
                 shaped_rewards[kicker_id] += BACKPASS_PENALTY
             else:
                 # [Kém] Chuyền ra ngoài vòng cấm nhưng vẫn ở phần sân đối phương
-                rewards_passing[kicker_id] = OUTSIDE_BOX_PENALTY
+                rewards_passing[kicker_id] += OUTSIDE_BOX_PENALTY
                 shaped_rewards[kicker_id] += OUTSIDE_BOX_PENALTY
 
         # ── R_in_box: Soft reward ưu tiên sút trong vòng cấm ─────────────────
