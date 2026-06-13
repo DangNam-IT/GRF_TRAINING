@@ -351,9 +351,9 @@ class GFootballGlobalWrapper(gym.Wrapper):
             original_agent_action = int(actions[idx])
             if original_agent_action > 8 or original_agent_action == 0:    # Actor chọn STAY (action 8-9) → đúng, giữ bóng để chuyền
                 # print(f"Agent {idx} giữ bóng với hành động {original_agent_action} → thưởng +0.6")
-                rewards_handover[idx] =  0.8
+                rewards_handover[idx] =  3
             elif 0 < original_agent_action <= 8:  # Actor chọn MOVE → phạt vì di chuyển khi đang cầm bóng
-                rewards_handover[idx] = -0.7
+                rewards_handover[idx] = -2
         rewards_handover = rewards_handover * HANDOVER_GAIN
 
         

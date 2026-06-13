@@ -538,10 +538,10 @@ class GFootballLocalWrapper(gym.Wrapper):
                     tactic_chosen: int = int(local_actions[idx]) % self.n_tactic_actions
                     # TACTIC_MAP = [19 (builtin_ai/pass), 12 (shot)]
                     # index 0 = pass/builtin_ai, index 1 = shot
-                    if tactic_chosen == 1:   # Shot
+                    if tactic_chosen == 3:   # Shot
                         rewards_in_box[idx]  = SHOT_IN_BOX_R
                         shaped_rewards[idx] += SHOT_IN_BOX_R
-                    elif tactic_chosen == 0:  # Pass / builtin_ai
+                    else:  # Pass / builtin_ai
                         rewards_in_box[idx]  = PASS_IN_BOX_P
                         shaped_rewards[idx] += PASS_IN_BOX_P
 
@@ -586,16 +586,6 @@ class GFootballLocalWrapper(gym.Wrapper):
         
         if (mapped_actions[kicker_id] == 11 or mapped_actions[kicker_id] == 12) and last_ball_owned_player == kicker_id:  # Nếu kicker chọn Shot (GRF 12) hoặc Pass (GRF 11)
             shaped_rewards[kicker_id] -= 0.3
-
-
-        # ── R_possession: Kiểm soát bóng (Table 13 §1) ───────────────────────
-        # rewards_possession: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
-        # if current_ball_owned == 1 and last_ball_owned != 1:
-        #     rewards_possession[:] = POSSESSION_LOSS / self.num_agents
-        #     shaped_rewards       += rewards_possession
-        # elif current_ball_owned == 0 and last_ball_owned != 0:
-        #     rewards_possession[:] = POSSESSION_GAIN / self.num_agents
-        #     shaped_rewards       += rewards_possession
 
         self.last_raw_obs = raw_obs
         state, obs_g, obs_l = self._get_all_obses_and_state(raw_obs)
