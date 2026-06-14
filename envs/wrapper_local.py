@@ -298,13 +298,6 @@ class GFootballLocalWrapper(gym.Wrapper):
         kicker_id: Optional[int] = 1
         
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
-        base_obs = raw_obs[0] if raw_obs is not None else None
-        # Tìm 5 cầu thủ đội nhà gần khung thành đối phương nhất (nhóm tấn công chủ chốt)
-        left_team = np.array(raw_obs[0]['left_team'])
-        dist_to_goal = np.sum((left_team - np.array([1.0, 0.0]))**2, axis=1)
-        
-        # Bốc ra ID của 5 người gần gôn nhất (trừ thủ môn và kicker)
-        key_attacker_ids = np.argsort(dist_to_goal)[:5]
         for i in range(self.num_agents):
             act = agent_actions[i]
             if 0 < act <= 8:
@@ -469,20 +462,22 @@ class GFootballLocalWrapper(gym.Wrapper):
         # Chỉ xét ball_holder hợp lệ thuộc đội ta
         valid_ball_holder: bool = (ball_team == 0 and ball_holder != -1)
 
+        # Đoạn code ánh xạ hành động mới
         for i in range(self.num_agents):
+            # 1. Nếu là người cầm bóng và GAgent yêu cầu xử lý chiến thuật
             if active_mask[i] and valid_ball_holder and i == ball_holder:
-                # [FIX #2] Chỉ người giữ bóng mới ra lệnh tactical
-                tactic_idx        = int(local_actions[i]) % self.n_tactic_actions
+                tactic_idx = int(local_actions[i]) % self.n_tactic_actions
                 mapped_actions[i] = self.TACTIC_MAP[tactic_idx]
+                
             else:
                 act = global_actions[i]
-                if 0 < act <= 8:
-                    mapped_actions[i] = act   # GRF action 1-8 (8 hướng di chuyển)
-                elif act == 0:
-                    mapped_actions[i] = 0
+                if 0 <= act <= 8:
+                    # 2. GAgent ra lệnh di chuyển (action 1-8)
+                    mapped_actions[i] = act   
                 else:
-                    mapped_actions[i] = 14     # GRF 14: release direction → đứng im
-
+                    # 3. GAgent ra lệnh STOP (act == 0 hoặc 9) HOẶC agent đứng ngoài vùng bóng
+                    # Bật Built-in AI (19) thay vì đứng im (14)
+                    mapped_actions[i] = 19
         raw_obs, rewards_list, done, info = self.env.step(mapped_actions)
         current_obs = raw_obs[0]
 
@@ -632,8 +627,6 @@ class GFootballLocalWrapper(gym.Wrapper):
                 # Chỉ thưởng 1 lần khi giành được quyền kiểm soát bóng
                 rewards_approach[current_ball_owned_player] = BALL_APPROACH_R
                 shaped_rewards[current_ball_owned_player] += BALL_APPROACH_R
-        # [FIX #6] Đã xóa dòng phạt kicker -0.3 khi dùng long_pass/shot.
-        # Phạt này xung đột trực tiếp với R_in_box (+2.0 khi shot trong vòng cấm).
 
         self.last_raw_obs = raw_obs
         state, obs_g, obs_l = self._get_all_obses_and_state(raw_obs)
