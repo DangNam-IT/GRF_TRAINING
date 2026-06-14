@@ -94,7 +94,25 @@ class CustomVecEnv:
             remote.send(('close', None))
         for p in self.processes:
             p.join()
+class PicklableEnvFactory:
+    """Lớp toàn cục giúp đóng gói cấu hình môi trường, tương thích 100% với cơ chế spawn."""
+    def __init__(self, rank, args):
+        self.rank = rank
+        self.args = args
 
+    def __call__(self):
+        import copy
+        args_copy = copy.copy(self.args)
+        # Ép buộc tắt render đồ họa trên Cloud để bảo đảm an toàn nghẽn luồng
+        args_copy.render = False 
+        
+        if self.rank > 0:
+            args_copy.dump_freq = 0
+        else:
+            args_copy.dump_freq = self.args.dump_freq // self.args.num_envs 
+            
+        base_env = create_env(args_copy)
+        return GFootballLocalWrapper(base_env, num_agents=args_copy.number_agents)
 
 # =====================================================================
 # MAIN TRAINING LOOP (VECTORIZED)
@@ -107,32 +125,43 @@ def create_env(args):
         rewards='scoring',
         render=args.render,
         write_full_episode_dumps=(args.dump_freq > 0),
+        write_goal_dumps=True,
         dump_frequency=args.dump_freq if args.dump_freq > 0 else 1,
-        logdir=args.video_dir
+        logdir=args.video_dir,
+        other_config_options={'action_set': 'v2'}
     )
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Phase 2 (LAgent) - Vectorized")
-    parser.add_argument("--num_envs", type=int, default=14, help="Number of parallel environments to run")
+    parser.add_argument("--num_envs", type=int, default=12, help="Number of parallel environments to run")
     parser.add_argument("--eps", type=int, default=7000, help="Number of episodes to train")
     parser.add_argument("--max_steps", type=int, default=300, help="Max steps per episode")
     parser.add_argument("--number_agents", type=int, default=11, help="Number of agents in the environment")
     parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent/test1/g_model", help="Path to load GAgent model")
-    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent/l_model", help="Path to save LAgent model")
+    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent/l_model_v2", help="Path to save LAgent model")
     parser.add_argument("--pre_lagent", type=str, default="experiments/models/lagent/test1/l_model", help="Path to load a pre-trained LAgent model")
 
     parser.add_argument("--g_eps", type=int, default=400, help="Number eps to run global agent")
-    parser.add_argument("--l_eps", type=int, default=1400, help="Number episodes to run local agent")
-    parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
+    parser.add_argument("--l_eps", type=int, default=0, help="Number episodes to run local agent")
+    parser.add_argument("--render", action="store_true", default=False, help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
     parser.add_argument("--save_freq_model", type=int, default=100, help="Model save frequency")
-    parser.add_argument("--log_file", type=str, default="experiments/reward_data/l_train_vec.csv", help="Path to the log CSV file")
-    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2/test1", help="Directory to save videos")
-    parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
+    parser.add_argument("--log_file", type=str, default="experiments/reward_data/l_train_v2_vec.csv", help="Path to the log CSV file")
+    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2/train_v2", help="Directory to save videos")
+    parser.add_argument("--dump_freq", type=int, default=60, help="Video dump frequency (0 to disable)")
     return parser.parse_args()
 
 
 def main():
+    import multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
+    # Thiết lập luồng tối ưu cho PyTorch trên chip AMD EPYC
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
     args = parse_args()
 
     # Tạo 1 env ảo (dummy) để trích xuất các thông số kích thước không gian (dim)
@@ -146,23 +175,8 @@ def main():
     STOP_ACTIONS = set(dummy_env.STOP_ACTIONS)
     dummy_env.close()
 
-    # Định nghĩa factory function để sinh ra các env con cho Vectorized Env
-    def make_env_fn(rank):
-        def _init():
-            args_copy = copy.copy(args)
-            # Chỉ render ở luồng 0 để tránh mở quá nhiều cửa sổ
-            if rank > 0:
-                args_copy.render = False
-                args_copy.dump_freq = 0
-            else:
-                args_copy.dump_freq = args.dump_freq // args.num_envs 
-            base_env = create_env(args_copy)
-            return GFootballLocalWrapper(base_env, num_agents=args_copy.number_agents)
-        return _init
-
     print(f"Đang khởi tạo {args.num_envs} môi trường song song...")
-    vec_env = CustomVecEnv([make_env_fn(i) for i in range(args.num_envs)])
-
+    vec_env = CustomVecEnv([PicklableEnvFactory(i, args) for i in range(args.num_envs)])
     # Khởi tạo Mô hình
     gagent = HES_COMA_Agent(state_dim=state_dim, obs_dim=obs_dim_g, n_actions=10, n_agents=args.number_agents)
     lagent = HES_COMA_Agent(state_dim=state_dim, obs_dim=obs_dim_l, n_actions=n_tactic_actions, n_agents=args.number_agents)
