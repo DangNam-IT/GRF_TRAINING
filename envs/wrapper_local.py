@@ -68,23 +68,15 @@ class GFootballLocalWrapper(gym.Wrapper):
     ]:
         """
         Tạo goals/obstacles cho Energy Field — mirror wrapper_global.
-        Tích hợp Dynamic Energy Fields:
         - Anticipatory Attractors (ball_direction)
         - Directional Repulsors (right_team_direction)
         Trả về thêm right_team và ball để tái sử dụng ở các hàm khác.
-
-        [MODULE 2 - FIX 0]: ball_direction đọc từ key riêng 'ball_direction',
-        KHÔNG phải từ base_obs['ball'][3:5] (ball chỉ có 3 phần tử [x,y,z]).
-        [MODULE 2 - FIX 2]: Phát hiện ball_in_flight — khóa attractor cố định
-        khi bóng bay bổng trên không (ball_z > 0.08).
         """
         base_obs   = raw_obs[0]
         left_team:  NDArray[np.float32] = np.array(base_obs["left_team"])
         right_team: NDArray[np.float32] = np.array(base_obs["right_team"])
         ball: NDArray[np.float32] = np.array(base_obs["ball"][:2])
-        is_corner_kick: bool = (
-            abs(abs(ball[0]) - 1.0) < 0.05 and abs(abs(ball[1]) - 0.42) < 0.05
-        )
+
         obstacles = []
 
 
@@ -295,16 +287,9 @@ class GFootballLocalWrapper(gym.Wrapper):
         agent_actions: NDArray[np.int64],
         raw_obs:       Optional[RawObs] = None,
     ) -> NDArray[np.int64]:
-        kicker_id: Optional[int] = 1
         
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
-        base_obs = raw_obs[0] if raw_obs is not None else None
-        # Tìm 5 cầu thủ đội nhà gần khung thành đối phương nhất (nhóm tấn công chủ chốt)
-        left_team = np.array(raw_obs[0]['left_team'])
-        dist_to_goal = np.sum((left_team - np.array([1.0, 0.0]))**2, axis=1)
-        
-        # Bốc ra ID của 5 người gần gôn nhất (trừ thủ môn và kicker)
-        key_attacker_ids = np.argsort(dist_to_goal)[:5]
+
         for i in range(self.num_agents):
             act = agent_actions[i]
             if 0 < act <= 8:
@@ -421,31 +406,30 @@ class GFootballLocalWrapper(gym.Wrapper):
         - R_ball_approach: Sau khi bóng vào vòng cấm, khuyến khích agent chủ động áp sát.
         - R_possession:   Possession change (+/-).
         """
-        # ── Hằng số reward (Table 13 §2) ─────────────────────────────────────
+        # ── Hằng số reward 
         ENV_SCALE:         float = 1.0 / self.num_agents
         PASSING_REWARD:    float =  0.5   # Kicker tạt bóng thành công
         ASSIST_REWARD:     float =  1.0   # Kiến tạo dẫn đến bàn thắng
-        # POSSESSION_LOSS:   float = -2.0
-        # POSSESSION_GAIN:   float =  1.0
         BALL_APPROACH_R:   float =  0.3   # Tiến về điểm rơi sau khi bóng vào vùng cấm
         # Role-based (§1.4): thưởng theo vùng chiến thuật khi ghi bàn
         ROLE_NEAR_POST:    float =  1.0
         ROLE_FAR_POST:     float =  1.0
-        ROLE_PENALTY_SPOT: float =  1.5   # Khó hơn → thưởng thêm hệ số khuyến khích
-        # # ── Cơ chế chuyền có chủ đích ─────────────────────────────────────────
-        # FACING_THRESHOLD:  float =  0.7   # cos θ tối thiểu để pass được coi là "trực diện"
-        # BAD_FACING_PENALTY: float = -0.4  # [RL trial-and-error] Phạt pass khi chưa nhìn thẳng bóng
+        ROLE_PENALTY_SPOT: float =  1.5   
         # ── Cơ chế ưu tiên sút trong vòng cấm ────────────────────────────────
         BOX_X_THRESHOLD:   float =  0.83  # GRF pitch x ∈ [-1, 1]
         BOX_Y_THRESHOLD:   float =  0.20  # GRF pitch |y| ∈ [0, 0.42]
-        SHOT_IN_BOX_R:     float =  2.0   # Thưởng cực mạnh khi sút trong vòng cấm
-        PASS_IN_BOX_P:     float = -1.5   # Phạt nặng khi chuyền trong vòng cấm (triệt tiêu chuyền quẩn)
-
+        SHOT_IN_BOX_R:     float =  3.5   # [FIX] Tăng từ 2.0→3.5 để outcompete R_passing
+        PASS_IN_BOX_P:     float = -1.5   # Phạt nặng khi chuyền trong vòng cấm
+        HIGH_PASS_FROM_BOX_P: float = -0.8  # [FIX] Phạt riêng high_pass từ trong vòng cấm
         # ── Cơ chế đánh giá đường chuyền của Kicker ──────────────────────────
         DANGER_ZONE_X:       float =  0.75
         DANGER_ZONE_Y:       float =  0.35
         BACKPASS_PENALTY:    float = -0.8
         OUTSIDE_BOX_PENALTY: float = -0.3
+        # ── Intent Reward (giảm biên độ, thêm context) ───────────────────────
+        INTENT_R:            float =  0.3   # [FIX] Giảm từ 1.0→0.3 để tránh bão hòa
+        # ── Anticipate Reward (chạy đến điểm rơi) ────────────────────────────
+        ANTICIPATE_R:        float =  0.12
 
         # ── Đọc trạng thái trước bước ─────────────────────────────────────────
         last_obs  = self.last_raw_obs[0] if self.last_raw_obs is not None else None
@@ -454,16 +438,8 @@ class GFootballLocalWrapper(gym.Wrapper):
         last_score: list[int]  = list(last_obs["score"])               if last_obs else [0, 0]
 
         # ── Corner-kick state machine (mirror _map_global_actions) ───────────
-        # Xác định kicker qua hàm chuẩn, không hardcode
         kicker_id: Optional[int] = 1
-        # Tìm 5 cầu thủ đội nhà gần khung thành đối phương nhất (nhóm tấn công chủ chốt)
-        # left_team_last = np.array(last_obs['left_team'])
-        # dist_to_goal = np.sum((left_team_last - np.array([1.0, 0.0]))**2, axis=1)
-        # key_attacker_ids = np.argsort(dist_to_goal)[:5]
-        # ── Ánh xạ hành động ─────────────────────────────────────────────────
         mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
-        # [FIX #2] Chỉ agent đang GIỮ BÓNG mới được thực thi tactical action.
-        # Các agent STOP khác giữ nguyên vị trí (action 0) để tránh "bắn vào không khí".
         ball_holder: int = last_obs.get("ball_owned_player", -1) if last_obs else -1
         ball_team:   int = last_obs.get("ball_owned_team",   -1) if last_obs else -1
         # Chỉ xét ball_holder hợp lệ thuộc đội ta
@@ -471,9 +447,11 @@ class GFootballLocalWrapper(gym.Wrapper):
 
         for i in range(self.num_agents):
             if active_mask[i] and valid_ball_holder and i == ball_holder:
-                # [FIX #2] Chỉ người giữ bóng mới ra lệnh tactical
                 tactic_idx        = int(local_actions[i]) % self.n_tactic_actions
                 mapped_actions[i] = self.TACTIC_MAP[tactic_idx]
+            elif active_mask[i]:
+                # [FIX #2] Agent STOP nhưng không có bóng → đứng giữ vị trí
+                mapped_actions[i] = 0
             else:
                 act = global_actions[i]
                 if 0 < act <= 8:
@@ -502,23 +480,47 @@ class GFootballLocalWrapper(gym.Wrapper):
         # ── R_passing: Đánh giá chất lượng đường chuyền của Kicker ───────────
         rewards_passing: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
 
-        # 1. Thưởng Ý Định (Intent Reward): Ép Kicker chọn High Pass
-        # [FIX #5] Chỉ bắn 1 lần khi Kicker VỪA nhận bóng (tránh spam ±1.0 mỗi step)
+        # 1. Thưởng Ý Định (Intent Reward): Ép Kicker chọn High Pass khi có receiver
         # TACTIC_MAP = [9(long), 10(high), 11(short), 12(shot)]
+        # [FIX] Giảm biên độ ±1.0 → ±INTENT_R(0.3) để tránh bão hòa sớm
+        # [FIX] Thêm điều kiện has_receiver: chỉ thưởng nếu có đồng đội trong vùng mục tiêu
         kicker_just_got_ball: bool = (
             kicker_id is not None
-            and last_ball_owned_player != kicker_id   # bước trước chưa có bóng
-            and last_ball_owned_player == -1          # bóng vừa rời tay người chuyền
-            and active_mask[kicker_id]                # GAgent nói kicker dừng
+            and last_ball_owned_player != kicker_id
+            and last_ball_owned_player == -1
+            and active_mask[kicker_id]
         )
         if kicker_just_got_ball:
             kicker_tactic = int(local_actions[kicker_id]) % self.n_tactic_actions
-            if kicker_tactic == 1:   # high_pass (index 1 = GRF 10)
-                rewards_passing[kicker_id] += 1.0
-                shaped_rewards[kicker_id] += 1.0
+            # Xác định vùng chiến thuật để kiểm tra receiver
+            _b = np.array(last_obs["ball"][:2]) if last_obs else np.zeros(2)
+            _sign = 1.0 if _b[0] > 0 else -1.0
+            _npost = np.array([_sign * 0.9, _b[1] * 0.1])
+            _kpos  = np.array(last_obs["left_team"][kicker_id]) if last_obs else np.zeros(2)
+            _kx    = float(_kpos[0])
+            _ky    = float(_kpos[1])
+            kicker_in_box: bool = (_sign * _kx > BOX_X_THRESHOLD and abs(_ky) < BOX_Y_THRESHOLD)
+            has_receiver: bool = any(
+                float(np.linalg.norm(np.array(last_obs["left_team"][j]) - _npost)) < 0.30
+                for j in range(self.num_agents) if j != kicker_id
+            ) if last_obs else False
+
+            if kicker_tactic == 1:   # high_pass
+                if kicker_in_box:
+                    # [FIX] Phạt high_pass từ trong vòng cấm (nên sút thay vì chuyền)
+                    rewards_passing[kicker_id] += HIGH_PASS_FROM_BOX_P
+                    shaped_rewards[kicker_id]  += HIGH_PASS_FROM_BOX_P
+                elif has_receiver:
+                    # Thưởng khi có người đón bóng ở vùng mục tiêu
+                    rewards_passing[kicker_id] += INTENT_R
+                    shaped_rewards[kicker_id]  += INTENT_R
+                else:
+                    # Phạt nhẹ khi high_pass vào không khí (không có receiver)
+                    rewards_passing[kicker_id] -= INTENT_R * 0.5
+                    shaped_rewards[kicker_id]  -= INTENT_R * 0.5
             else:                    # short_pass / long_pass / shot
-                rewards_passing[kicker_id] -= 1.0
-                shaped_rewards[kicker_id] -= 1.0
+                rewards_passing[kicker_id] -= INTENT_R
+                shaped_rewards[kicker_id]  -= INTENT_R
 
         # 2. Thưởng Kết Quả (Outcome Reward): Bóng đến vùng nguy hiểm
         if (
@@ -548,13 +550,7 @@ class GFootballLocalWrapper(gym.Wrapper):
                 rewards_passing[kicker_id] += OUTSIDE_BOX_PENALTY
                 shaped_rewards[kicker_id] += OUTSIDE_BOX_PENALTY
 
-        # ── R_in_box: Soft reward ưu tiên sút trong vòng cấm ─────────────────
-        # [THIẾT KẾ] Dùng last_obs (trạng thái T) thay vì current_obs (trạng thái T+1)
-        # vì local_actions được chọn dựa trên obs tại T:
-        #   - Sau khi GRF thực thi shot/pass, bóng đã bay đi → ball_owned_player = -1
-        #     → dùng current_obs sẽ không bao giờ detect được in_box
-        #   - Cần đánh giá "agent có đứng trong box KHÔNG khi ra quyết định?"
-        #     → đúng ngữ nghĩa RL: reward phải phản ánh (s_t, a_t), không phải (s_{t+1}, a_t)
+        # ── R_in_box: Soft reward ưu tiên sút trong vòng cấm 
         last_left_team: NDArray[np.float32] = np.array(last_obs["left_team"])
         rewards_in_box: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
         if last_obs is not None:
@@ -585,10 +581,7 @@ class GFootballLocalWrapper(gym.Wrapper):
             rewards_assist[kicker_id] = ASSIST_REWARD
             shaped_rewards[kicker_id] += ASSIST_REWARD
 
-        # ── R_role_based: Dense positioning reward + Sparse goal bonus ────────
-        # [FIX #4] Thay thế R_role chỉ kích hoạt khi ghi bàn (dead reward) bằng dense reward:
-        #   - Thưởng nhỏ (+0.1) mỗi step khi agent đứng đúng vùng chiến thuật VÀ bóng đang bay.
-        #   - Thưởng lớn (ROLE_*) khi ghi bàn (giữ nguyên như cũ).
+        # ── R_role_based: Dense positioning reward + Sparse goal bonus
         rewards_role: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
         if last_obs is not None:
             ball_init: NDArray[np.float32] = np.array(last_obs["ball"][:2])
@@ -612,18 +605,23 @@ class GFootballLocalWrapper(gym.Wrapper):
                     elif float(np.linalg.norm(pos - penalty_spot_zone)) < 0.20:
                         rewards_role[i] = ROLE_PENALTY_SPOT
                         shaped_rewards[i] += ROLE_PENALTY_SPOT
-                elif current_ball_owned == -1 and i != kicker_id:
-                    # [FIX #4] Dense: thưởng nhỏ khi bóng đang bay và agent đứng đúng vị trí
-                    DENSE_POS_R: float = 0.05
-                    if float(np.linalg.norm(pos - near_post_zone)) < 0.15:
-                        rewards_role[i] += DENSE_POS_R
-                        shaped_rewards[i] += DENSE_POS_R
-                    elif float(np.linalg.norm(pos - far_post_zone)) < 0.15:
-                        rewards_role[i] += DENSE_POS_R
-                        shaped_rewards[i] += DENSE_POS_R
-                    elif float(np.linalg.norm(pos - penalty_spot_zone)) < 0.20:
-                        rewards_role[i] += DENSE_POS_R * 1.5  # Penalty spot khó hơn → thưởng cao hơn
-                        shaped_rewards[i] += DENSE_POS_R * 1.5
+                elif i != kicker_id:
+                    # [FIX #3] Thay ball_owned==-1 bằng ball_z>0.1 (bóng đang bay)
+                    # corner kick: ball_owned thường là 0 (player 1 giữ bóng)
+                    # nên điều kiện cũ hầu như không kích hoạt
+                    _ball_z = float(current_obs.get('ball', [0, 0, 0])[2])
+                    ball_is_airborne: bool = _ball_z > 0.1
+                    if ball_is_airborne:
+                        DENSE_POS_R: float = 0.08   # Tăng từ 0.05 → 0.08
+                        if float(np.linalg.norm(pos - near_post_zone)) < 0.15:
+                            rewards_role[i] += DENSE_POS_R
+                            shaped_rewards[i] += DENSE_POS_R
+                        elif float(np.linalg.norm(pos - far_post_zone)) < 0.15:
+                            rewards_role[i] += DENSE_POS_R
+                            shaped_rewards[i] += DENSE_POS_R
+                        elif float(np.linalg.norm(pos - penalty_spot_zone)) < 0.20:
+                            rewards_role[i] += DENSE_POS_R * 1.5
+                            shaped_rewards[i] += DENSE_POS_R * 1.5
 
         # ── R_ball_approach: Thưởng Sparse khi chạm cắt bóng thành công ─────
         rewards_approach: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
@@ -632,8 +630,22 @@ class GFootballLocalWrapper(gym.Wrapper):
                 # Chỉ thưởng 1 lần khi giành được quyền kiểm soát bóng
                 rewards_approach[current_ball_owned_player] = BALL_APPROACH_R
                 shaped_rewards[current_ball_owned_player] += BALL_APPROACH_R
-        # [FIX #6] Đã xóa dòng phạt kicker -0.3 khi dùng long_pass/shot.
-        # Phạt này xung đột trực tiếp với R_in_box (+2.0 khi shot trong vòng cấm).
+
+        # ── R_anticipate: Thưởng khi agent tiến gần điểm rơi dự đoán của bóng ─
+        # [FIX #4] Khuyến khích chạy đón bóng thay vì đứng yên khi bóng bay
+        _ball_arr = np.array(current_obs.get('ball', [0, 0, 0]), dtype=np.float32)
+        _ball_dir = np.array(current_obs.get('ball_direction', [0, 0, 0]), dtype=np.float32)
+        _ball_z_now = float(_ball_arr[2])
+        if _ball_z_now > 0.1:   # Bóng đang bay
+            # Ước tính điểm rơi tuyến tính (10 bước tới)
+            est_landing: NDArray[np.float32] = _ball_arr[:2] + _ball_dir[:2] * 10
+            for i in range(self.num_agents):
+                if i == kicker_id:
+                    continue
+                dist_to_landing = float(np.linalg.norm(left_team[i] - est_landing))
+                if dist_to_landing < 0.2:   # Agent gần điểm rơi dự kiến
+                    rewards_approach[i] += ANTICIPATE_R
+                    shaped_rewards[i]   += ANTICIPATE_R
 
         self.last_raw_obs = raw_obs
         state, obs_g, obs_l = self._get_all_obses_and_state(raw_obs)
@@ -646,7 +658,6 @@ class GFootballLocalWrapper(gym.Wrapper):
             'R_assist':     float(np.sum(rewards_assist)),
             'R_role':       float(np.sum(rewards_role)),
             'R_approach':   float(np.sum(rewards_approach)),
-            # 'R_possession': float(np.sum(rewards_possession)),
         }
 
         return state, obs_g, obs_l, shaped_rewards, done, reward_info
