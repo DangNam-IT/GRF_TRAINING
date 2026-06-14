@@ -19,25 +19,26 @@ def create_env(args):
         render=args.render,
         write_full_episode_dumps=(args.dump_freq > 0),
         dump_frequency=args.dump_freq if args.dump_freq > 0 else 1,
-        logdir=args.video_dir
+        logdir=args.video_dir,
+        other_config_options={'action_set': 'v2'},
     )
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Phase 2 (LAgent)")
     parser.add_argument("--eps", type=int, default=3000, help="Number of episodes to train")
-    parser.add_argument("--max_steps", type=int, default=150, help="Max steps per episode")
+    parser.add_argument("--max_steps", type=int, default=300, help="Max steps per episode")
     parser.add_argument("--number_agents", type=int, default=11, help="Number of agents in the environment")
     parser.add_argument("--gagent_model", type=str, default="experiments/models/gagent/test1/g_model", help="Path to load GAgent model")
-    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent/test1/l_model", help="Path to save LAgent model")
+    parser.add_argument("--lagent_model", type=str, default="experiments/models/lagent/l_model", help="Path to save LAgent model")
     parser.add_argument("--pre_lagent", type=str, default="experiments/models/lagent/test5/l_model", help="Path to load a pre-trained LAgent model")
 
-    parser.add_argument("--g_eps",     type=int,   default=500,                               help="Number eps to run global agent")
+    parser.add_argument("--g_eps",     type=int,   default=400,                               help="Number eps to run global agent")
     parser.add_argument("--l_eps",     type=int,   default=0,                               help="Number episodes to run local agent")
     parser.add_argument("--render", action="store_true", default=True, help="Enable rendering")
     parser.add_argument("--no_render", action="store_false", dest="render", help="Disable rendering")
     parser.add_argument("--save_freq_model", type=int, default=100, help="Model save frequency")
-    parser.add_argument("--log_file", type=str, default="experiments/test1/l_train.csv", help="Path to the log CSV file")
-    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2/test1", help="Directory to save videos")
+    parser.add_argument("--log_file", type=str, default="experiments/train_reward/one/l_train.csv", help="Path to the log CSV file")
+    parser.add_argument("--video_dir", type=str, default="experiments/videos/phase2", help="Directory to save videos")
     parser.add_argument("--dump_freq", type=int, default=0, help="Video dump frequency (0 to disable)")
 
     # # Colab-specific arguments
