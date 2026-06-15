@@ -451,15 +451,27 @@ class GFootballLocalWrapper(gym.Wrapper):
 
         # [FIX STICKY] Helper: tính GRF direction action (1–8) từ vector hướng
         def _direction_from_vec(dx: float, dy: float) -> int:
-            """GRF 8-direction: 1=up,2=top_left,3=left,4=bottom_left,
-                                5=down,6=bottom_right,7=right,8=top_right"""
+            """GRF Action Map: 1=left, 2=top_left, 3=top, 4=top_right,
+                               5=right, 6=bottom_right, 7=bottom, 8=bottom_left.
+               (Note: +x is right, +y is bottom in GRF pitch coords)"""
             angle = float(np.degrees(np.arctan2(dy, dx))) % 360
-            thresholds = [(22.5, 1), (67.5, 8), (112.5, 7), (157.5, 6),
-                          (202.5, 5), (247.5, 4), (292.5, 3), (337.5, 2), (360.0, 1)]
-            for thresh, act in thresholds:
-                if angle < thresh:
-                    return act
-            return 1
+            # Right is 0 deg. Bottom is 90 deg. Left is 180 deg. Top is 270 deg.
+            if angle < 22.5 or angle >= 337.5:
+                return 5  # right
+            elif angle < 67.5:
+                return 6  # bottom_right
+            elif angle < 112.5:
+                return 7  # bottom
+            elif angle < 157.5:
+                return 8  # bottom_left
+            elif angle < 202.5:
+                return 1  # left
+            elif angle < 247.5:
+                return 2  # top_left
+            elif angle < 292.5:
+                return 3  # top
+            else:
+                return 4  # top_right
 
         for i in range(self.num_agents):
             if active_mask[i] and valid_ball_holder and i == ball_holder:
