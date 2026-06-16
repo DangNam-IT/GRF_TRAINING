@@ -9,8 +9,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from utils.energy_field import EnergyFieldDefiner, FieldItem
-
-# Kiểu raw observation của GRF: list of dict (1 dict per agent, nhưng shared state)
 RawObs = List[Dict[str, Any]]
 
 
@@ -43,7 +41,6 @@ class GFootballGlobalWrapper(gym.Wrapper):
         self.last_energy_fields: Optional[NDArray[np.float32]] = None
 
         self._kicker_id:   Optional[int] = 1
-    # =========================================================================
     def _extract_positions(
         self,
         raw_obs: RawObs,
@@ -82,10 +79,6 @@ class GFootballGlobalWrapper(gym.Wrapper):
 
         
         return left_team, goals, obstacles
-
-    # =========================================================================
-    # PHẦN 2: RAY-CAST
-    # =========================================================================
 
     def _raycast_from_agent(
         self,
@@ -170,8 +163,6 @@ class GFootballGlobalWrapper(gym.Wrapper):
         base_obs:   Dict[str, Any],
     ) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
         """
-        [YÊU CẦU 2]: Làm giàu Không gian Quan sát (Obs Enrichment)
-
         Obs layout (70 chiều):
           rays        (48) = 16 tia × 3 kênh [opponent, teammate, target_zone]
           energy       (1) = energy field value của agent
@@ -195,7 +186,7 @@ class GFootballGlobalWrapper(gym.Wrapper):
 
         energy_field_info: NDArray[np.float32] = np.array([energy_val], dtype=np.float32)
 
-        # [YÊU CẦU 2.1]: Cờ sở hữu bóng (Boolean flag)
+        #  Cờ sở hữu bóng (Boolean flag)
         ball_owned_team   = base_obs.get("ball_owned_team", -1)
         ball_owned_player = base_obs.get("ball_owned_player", -1)
         is_ball_owned     = 1.0 if (ball_owned_team == 0 and ball_owned_player == agent_idx) else 0.0
@@ -240,10 +231,8 @@ class GFootballGlobalWrapper(gym.Wrapper):
         agent_actions: NDArray[np.int64],
         raw_obs:       Optional[RawObs] = None,
     ) -> NDArray[np.int64]:
-        kicker_id: Optional[int] = self._kicker_id
-
-        mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
         
+        mapped_actions: NDArray[np.int64] = np.zeros(self.num_agents, dtype=int)
         for i in range(self.num_agents):
             act = int(agent_actions[i])
             if 0 < act <= 8:
@@ -253,19 +242,12 @@ class GFootballGlobalWrapper(gym.Wrapper):
             else:
                 mapped_actions[i] = 14     # GRF 14: release direction → đứng im
         return mapped_actions
-
-    # =========================================================================
-    # PHẦN 6: RESET & STEP
-    # =========================================================================
-
     def _get_all_obses_and_state(
         self,
         raw_obs: RawObs,
     ) -> Tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
         """
-        Tính toán state và observations từ raw_obs.
-        Được gọi bởi reset(), step() và step_builtin_ai() — không duplicate code.
-
+        Trả về state toàn cức (46,) + obses (11, 54) + energy_fields (11,)
         Returns:
             state  (46,)    — global state vector
             obses  (11, 54) — per-agent GAgent observations
@@ -293,11 +275,6 @@ class GFootballGlobalWrapper(gym.Wrapper):
     def reset(self, **kwargs: Any) -> Tuple[NDArray[np.float32], NDArray[np.float32]]:
         raw_obs: RawObs = self.env.reset(**kwargs)
         self.last_raw_obs = raw_obs
-        self._kicker_id   = None
-        self._aim_frames  = 0
-        self._kick_frames = 0
-        self._has_kicked  = False
-
         state, obses, energy_fields = self._get_all_obses_and_state(raw_obs)
         self.last_energy_fields = energy_fields
 
@@ -317,10 +294,8 @@ class GFootballGlobalWrapper(gym.Wrapper):
 
         safe_actions: NDArray[np.int64] = self._map_global_actions(actions, raw_obs=self.last_raw_obs)
         raw_obs, rewards, done, info = self.env.step(safe_actions)
-        self.last_act = safe_actions
         state, obses, energy_fields = self._get_all_obses_and_state(raw_obs)
         base_obs = raw_obs[0]
-        left_team: NDArray[np.float32] = np.array(base_obs["left_team"])
 
         # Hằng số chuẩn hóa
         ENERGY_SCALE:    float = 0.05   
@@ -328,41 +303,22 @@ class GFootballGlobalWrapper(gym.Wrapper):
 
         # 1. R_energy
         rewards_energy: NDArray[np.float32] = (-energy_fields) * ENERGY_SCALE 
-
-        # Tìm lại ID của các tiền đạo gần khung thành đối phương (X=1.0) nhất giống như hàm map_actions
-        # dist_to_goal = np.sum((left_team - np.array([1.0, 0.0]))**2, axis=1)
-        # key_attacker_ids = np.argsort(dist_to_goal)[:5]
-        
-        # # Tập hợp danh sách ID của tối đa 5 tác tử chủ chốt
-        # key_agent_ids = list(key_attacker_ids)
-        # if kicker_id is not None:
-        #     key_agent_ids.append(kicker_id)
-        # key_agent_ids = list(set(key_agent_ids)) # Lọc trùng nếu kicker nằm trong top 5
         
         # 4. R_possession
         current_ball_owned_team: int = base_obs.get("ball_owned_team", -1)
         current_ball_owned_player: int = base_obs.get("ball_owned_player", -1)
 
         rewards_handover: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
-        # [FIX] Chỉ thưởng/phạt cầu thủ ĐANG CẦM BÓNG — không phạt đồng đội
-        # → Ép TẤT CẢ phải MOVE → không có mục tiêu rõ → chọn hướng energy cao nhất → bầy đàn 1 hướng
         if current_ball_owned_team == 0 and current_ball_owned_player != -1:
             idx = current_ball_owned_player
             original_agent_action = int(actions[idx])
             if original_agent_action > 8 or original_agent_action == 0:    # Actor chọn STAY (action 8-9) → đúng, giữ bóng để chuyền
-                # print(f"Agent {idx} giữ bóng với hành động {original_agent_action} → thưởng +0.6")
-                rewards_handover[idx] =  3
-            elif 0 < original_agent_action <= 8:  # Actor chọn MOVE → phạt vì di chuyển khi đang cầm bóng
-                rewards_handover[idx] = -2
+                rewards_handover[idx] =  1.0
+            elif 0 < original_agent_action <= 8:
+                rewards_handover[idx] = -0.6
         rewards_handover = rewards_handover * HANDOVER_GAIN
 
-        
-        
-        # Tổng hợp và chuẩn hóa [-1.0, 1.0]
         shaped_rewards: NDArray[np.float32] = rewards_energy + rewards_handover
-
-        # Chuẩn hóa riêng để dễ phân tích tác động
-        # shaped_rewards = np.clip(shaped_rewards, -1.0, 1.0)
 
         # ── Cập nhật buffer và trạng thái cho bước kế tiếp ──────────────────
         self.last_raw_obs = raw_obs
@@ -374,25 +330,3 @@ class GFootballGlobalWrapper(gym.Wrapper):
         }
 
         return state, obses, shaped_rewards, rewards_view, done
-
-    def step_builtin_ai(
-        self,
-    ) -> Tuple[
-        NDArray[np.float32],   # state  (46,)
-        NDArray[np.float32],   # obses  (11, 54)
-        NDArray[np.float32],   # rewards (11,)
-        bool,                  # done
-    ]:
-        """
-        Giao toàn bộ điều khiển cho Built-in AI của GRF (action_set='v2').
-        KHOONG qua _map_global_actions — gửi action=19 thẳng vào engine.
-        """
-        ACTION_BUILTIN_AI = 19
-        grf_actions = np.full(self.num_agents, ACTION_BUILTIN_AI, dtype=np.int64)
-        raw_obs, rewards, done, _ = self.env.step(grf_actions)
-
-        self.last_raw_obs = raw_obs
-        state, obses, energy_fields = self._get_all_obses_and_state(raw_obs)
-        self.last_energy_fields = energy_fields
-
-        return state, obses, rewards, done
