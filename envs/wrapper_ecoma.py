@@ -49,13 +49,13 @@ class ECOMA_Wrapper(gym.Wrapper):
         far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -ball[1] * 0.1])
         penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
 
-        # THAY ĐỔI: Thu hẹp Sigma, Đào sâu Scale để tạo khoảng trống rõ rệt
+       
         goals = [
             {"position": near_post,    "sigma": 0.3, "scale": -2.0},
             {"position": far_post,     "sigma": 0.3, "scale": -1.5},
             {"position": penalty_spot, "sigma": 0.6, "scale": -2.5},
         ]
-        # THAY ĐỔI: Thu hẹp Sigma của hậu vệ để Agent có kẽ hở luồn lách
+        
         obstacles = []
         for pos in right_team:
             obstacles.append({"position": pos, "sigma": 0.05, "scale": 0.1})
@@ -123,7 +123,7 @@ class ECOMA_Wrapper(gym.Wrapper):
         return np.minimum(arr / max_distance, 1.0)  # (48,) = 16 × 3
 
     # =========================================================================
-    # PHẦN 3: XÂY DỰNG QUAN SÁT
+    # XÂY DỰNG QUAN SÁT
     # =========================================================================
     def _process_single_obs(
         self,
@@ -206,11 +206,11 @@ class ECOMA_Wrapper(gym.Wrapper):
         for i in range(self.num_agents):
             act = int(agent_actions[i])
             if 0 <  act <= 12:
-                mapped_actions[i] = act   # GRF action 1-8 (8 hướng di chuyển)
+                mapped_actions[i] = act   
             elif act == 0:
                 mapped_actions[i] = 0
             else:
-                mapped_actions[i] = 14     # GRF 14: release direction → đứng im
+                mapped_actions[i] = 14 
         return mapped_actions
     
     def _get_all_obses_and_state(
@@ -255,20 +255,20 @@ class ECOMA_Wrapper(gym.Wrapper):
         return state, obses
     
     def step(self, actions):
-        ENV_SCALE:         float = 1.0 / self.num_agents
+        ENV_SCALE:         float = 1.0
         ENERGY_SCALE:    float = 0.05
         PASSING_REWARD:    float =  0.5   # Kicker tạt bóng thành công
         ASSIST_REWARD:     float =  1.0   # Kiến tạo dẫn đến bàn thắng
         BALL_APPROACH_R:   float =  0.3   # Tiến về điểm rơi sau khi bóng vào vùng cấm
-        # Role-based (§1.4): thưởng theo vùng chiến thuật khi ghi bàn
+        # Role-based: thưởng theo vùng chiến thuật khi ghi bàn
         ROLE_NEAR_POST:    float =  1.0
         ROLE_FAR_POST:     float =  1.0
         ROLE_PENALTY_SPOT: float =  1.5   
         # ── Cơ chế ưu tiên sút trong vòng cấm ────────────────────────────────
         BOX_X_THRESHOLD:   float =  0.83  # GRF pitch x ∈ [-1, 1]
         BOX_Y_THRESHOLD:   float =  0.20  # GRF pitch |y| ∈ [0, 0.42]
-        SHOT_IN_BOX_R:     float =  2.0   # Thưởng cực mạnh khi sút trong vòng cấm
-        PASS_IN_BOX_P:     float = -1.5   # Phạt nặng khi chuyền trong vòng cấm (triệt tiêu chuyền quẩn)
+        SHOT_IN_BOX_R:     float =  2.0   
+        PASS_IN_BOX_P:     float = -1.5  
         # ── Cơ chế đánh giá đường chuyền của Kicker ──────────────────────────
         DANGER_ZONE_X:       float =  0.75
         DANGER_ZONE_Y:       float =  0.35
@@ -304,12 +304,11 @@ class ECOMA_Wrapper(gym.Wrapper):
         # ── R_passing: Đánh giá chất lượng đường chuyền của Kicker ───────────
         rewards_passing: NDArray[np.float32] = np.zeros(self.num_agents, dtype=np.float32)
 
-        # 1. Thưởng Ý Định (Intent Reward): Ép Kicker chọn High Pass
         # TACTIC_MAP = [9(long), 10(high), 11(short), 12(shot)]
         kicker_just_got_ball: bool = (
             kicker_id is not None
-            and last_ball_owned_player != kicker_id   # bước trước chưa có bóng
-            and last_ball_owned_player == -1          # bóng vừa rời tay người chuyền
+            and last_ball_owned_player != kicker_id  
+            and last_ball_owned_player == -1         
         )
         if kicker_just_got_ball:
             kicker_tactic = int(safe_action[kicker_id])

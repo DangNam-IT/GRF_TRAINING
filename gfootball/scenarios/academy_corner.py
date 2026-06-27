@@ -28,7 +28,7 @@ def build_scenario(builder):
   builder.config().end_episode_on_out_of_play = True
   builder.config().end_episode_on_possession_change = False
 
-  builder.SetBallPosition(0.999, 0.42)
+  builder.SetBallPosition(0.99, 0.41)
 
   builder.SetTeam(Team.e_Left)
   builder.AddPlayer(-1.0, 0.0, e_PlayerRole_GK)

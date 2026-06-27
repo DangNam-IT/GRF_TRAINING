@@ -63,15 +63,11 @@ class GFootballGlobalWrapper(gym.Wrapper):
         far_post:     NDArray[np.float32] = np.array([target_sign * 0.9, -ball[1] * 0.1])
         penalty_spot: NDArray[np.float32] = np.array([target_sign * 0.8,  0.0])
 
-        # THAY ĐỔI: Thu hẹp Sigma, Đào sâu Scale để tạo khoảng trống rõ rệt
-        # Tăng mạnh sigma để lực hút lan tỏa ra xa, giải quyết Vanishing Gradient
         goals = [
             {"position": near_post,    "sigma": 0.3, "scale": -2.0},
             {"position": far_post,     "sigma": 0.3, "scale": -1.5},
             {"position": penalty_spot, "sigma": 0.6, "scale": -2.5},
         ]
-        # THAY ĐỔI: Thu hẹp Sigma của hậu vệ để Agent có kẽ hở luồn lách
-        # Đảm bảo scale dương (lực đẩy). Không để âm (âm là hút).
         obstacles = [
             {"position": pos, "sigma": 0.05, "scale": 0.1} for pos in right_team
         ]
@@ -147,7 +143,7 @@ class GFootballGlobalWrapper(gym.Wrapper):
         return np.minimum(arr / max_distance, 1.0)  # (48,) = 16 × 3
 
     # =========================================================================
-    # PHẦN 3: XÂY DỰNG QUAN SÁT
+    # XÂY DỰNG QUAN SÁT
     # =========================================================================
 
     def _process_single_obs(
