@@ -43,139 +43,153 @@ class HES_COMA_Agent:
 
     def get_actions(
         self,
-        obs_batch: NDArray[np.float32],  # (n_agents, obs_dim)
-    ) -> Tuple[NDArray[np.int64], NDArray[np.float32]]:
+        obs_batch: NDArray[np.float32],  # (num_envs, n_agents, obs_dim)
+        hidden_states: Tensor,           # (num_envs * n_agents, 128)
+        epsilon: float = 0.0,
+    ) -> Tuple[NDArray[np.int64], NDArray[np.float32], Tensor]:
         """
-        Lấy hành động cho 11 agents cùng lúc (inference, no grad).
-
-        Returns:
-            actions: (n_agents,) — chỉ số hành động.
-            probs:   (n_agents, n_actions) — xác suất mỗi hành động.
+        Lấy hành động với GRU và Epsilon-Greedy.
         """
-        obs_tensor: Tensor = torch.FloatTensor(obs_batch).to(self.device)
+        num_envs = obs_batch.shape[0]
+        obs_flat = obs_batch.reshape(-1, obs_batch.shape[-1])
+        obs_tensor: Tensor = torch.FloatTensor(obs_flat).to(self.device)
+        
         with torch.no_grad():
-            probs: Tensor = self.actor(obs_tensor)
-            dist  = torch.distributions.Categorical(probs)
-            actions: Tensor = dist.sample()
-        return actions.cpu().numpy(), probs.cpu().numpy()
+            probs, new_hidden_states = self.actor(obs_tensor, hidden_states)
+            
+            # Khám phá Epsilon-Greedy
+            if np.random.rand() < epsilon:
+                # Lấy hành động ngẫu nhiên
+                actions = torch.randint(0, self.n_actions, (num_envs * self.n_agents,), device=self.device)
+            else:
+                dist = torch.distributions.Categorical(probs)
+                actions = dist.sample()
+                
+        actions_np = actions.cpu().numpy().reshape(-1, self.n_agents)
+        probs_np = probs.cpu().numpy().reshape(-1, self.n_agents, self.n_actions)
+        
+        return actions_np, probs_np, new_hidden_states
 
-    def update(self, buffer: RolloutBuffer) -> None:
+    def update(self, buffer: RolloutBuffer, num_envs: int = 1) -> None:
         """
-        Cập nhật tham số Actor và Critic theo thuật toán COMA.
-
-        Thứ tự chuẩn:
-          1. Tính Q-values và Counterfactual Baseline dựa trên tham số Critic cũ.
-          2. Tính TD-target (no_grad).
-          3. Cập nhật Critic (critic_optimizer.step).
-          4. Tính advantage từ Q-values đã detach — bảo toàn gradient riêng.
-          5. Cập nhật Actor với per-agent advantage (reduction='none' → mean over batch).
-          6. Giải phóng buffer.
-
-        [MODULE 1 - FIX 2]: Bảo toàn hàm phần thưởng bất đối xứng
-          Critic loss dùng `reduction='none'` + mean theo batch để giữ nguyên
-          gradient Q cá thể hóa (T, n_agents) theo Trường Năng lượng.
-          Không dùng global `.mean()` vì sẽ san bằng chênh lệch phần thưởng.
-
-        Args:
-            buffer: RolloutBuffer chứa dữ liệu episode.
+        Cập nhật tham số Actor và Critic theo thuật toán COMA (với BPTT qua GRU).
         """
         states_np, obses_np, actions_np, rewards_np, next_states_np, next_obses_np, dones_np, active_masks_np = buffer.get_data()
         if len(states_np) == 0:
-            # [MODULE 1 - FIX 3]: Giải phóng bộ đệm ngay cả khi buffer rỗng
             buffer.clear()
             return
 
         # ── Chuyển sang Tensor ──────────────────────────────────────────────
-        states:       Tensor = torch.FloatTensor(states_np).to(self.device)        # (T, state_dim)
-        obses:        Tensor = torch.FloatTensor(obses_np).to(self.device)         # (T, n_agents, obs_dim)
-        actions:      Tensor = torch.LongTensor(actions_np).to(self.device)        # (T, n_agents)
-        rewards:      Tensor = torch.FloatTensor(rewards_np).to(self.device)       # (T, n_agents)
-        next_states:  Tensor = torch.FloatTensor(next_states_np).to(self.device)   # (T, state_dim)
-        next_obses:   Tensor = torch.FloatTensor(next_obses_np).to(self.device)    # (T, n_agents, obs_dim)
-        dones:        Tensor = torch.FloatTensor(dones_np).unsqueeze(1).to(self.device)  # (T, 1)
-        active_masks: Tensor = torch.FloatTensor(active_masks_np).to(self.device)        # (T, n_agents)
+        N = len(states_np)
+        T = N // num_envs
+        
+        # Reshape thành (T, num_envs, ...)
+        states:       Tensor = torch.FloatTensor(states_np).view(T, num_envs, -1).to(self.device)
+        obses:        Tensor = torch.FloatTensor(obses_np).view(T, num_envs, self.n_agents, -1).to(self.device)
+        actions:      Tensor = torch.LongTensor(actions_np).view(T, num_envs, self.n_agents).to(self.device)
+        rewards:      Tensor = torch.FloatTensor(rewards_np).view(T, num_envs, self.n_agents).to(self.device)
+        next_states:  Tensor = torch.FloatTensor(next_states_np).view(T, num_envs, -1).to(self.device)
+        next_obses:   Tensor = torch.FloatTensor(next_obses_np).view(T, num_envs, self.n_agents, -1).to(self.device)
+        dones:        Tensor = torch.FloatTensor(dones_np).view(T, num_envs, 1).to(self.device)
+        active_masks: Tensor = torch.FloatTensor(active_masks_np).view(T, num_envs, self.n_agents).to(self.device)
 
-        batch_size: int = states.size(0)
+        joint_actions_onehot: Tensor = F.one_hot(actions, self.n_actions).float()
 
-        joint_actions_onehot: Tensor = F.one_hot(actions, self.n_actions).float()  # (T, n_agents, n_actions)
+        # ── Forward qua thời gian (BPTT) cho Critic và Actor ─────────────────
+        # Khởi tạo hidden states
+        h_actor = torch.zeros(num_envs * self.n_agents, 128, device=self.device)
+        h_critic = torch.zeros(num_envs, 128, device=self.device)
+        
+        h_actor_next = torch.zeros(num_envs * self.n_agents, 128, device=self.device)
+        h_critic_next = torch.zeros(num_envs, 128, device=self.device)
 
-        # ── BƯỚC 1: Q-values và Counterfactual Baseline (dùng tham số Critic CŨ) ──
-        # [MODULE 1 - FIX 1]: Toàn bộ tính toán advantage phải hoàn tất
-        # trước critic_optimizer.step() để baseline không bị nhiễm bởi tham số mới.
-        q_values: Tensor = self.critic(states, joint_actions_onehot)   # (T, n_agents)
+        q_values_list = []
+        baseline_list = []
+        next_q_values_list = []
+        probs_list = []
 
-        # Counterfactual Baseline: E_a'[Q(s, a'_i, a_{-i})] theo chính sách hiện tại
-        baseline: Tensor = torch.zeros_like(q_values)  # (T, n_agents)
-        with torch.no_grad():
-            probs_for_baseline: Tensor = self.actor(
-                obses.view(-1, obses.shape[-1])
-            ).view(batch_size, self.n_agents, self.n_actions)  # (T, n_agents, n_actions)
+        for t in range(T):
+            # Reset hidden state nếu episode trước đó đã kết thúc
+            if t > 0:
+                mask = (1 - dones[t-1]).view(num_envs, 1)
+                h_actor = h_actor * mask.repeat_interleave(self.n_agents, dim=0)
+                h_critic = h_critic * mask
+                h_actor_next = h_actor_next * mask.repeat_interleave(self.n_agents, dim=0)
+                h_critic_next = h_critic_next * mask
 
-        for i in range(self.n_agents):
-            for a in range(self.n_actions):
-                temp_joint_actions: Tensor = actions.clone()
-                temp_joint_actions[:, i]   = a
-                temp_joint_onehot:  Tensor = F.one_hot(temp_joint_actions, self.n_actions).float()
-                # Detach để tách khỏi đồ thị tính gradient của Critic
-                q_temp: Tensor = self.critic(states, temp_joint_onehot)[:, i].detach()
-                baseline[:, i] += probs_for_baseline[:, i, a] * q_temp
+            obs_t = obses[t].view(-1, obses.shape[-1])
+            state_t = states[t]
+            action_onehot_t = joint_actions_onehot[t]
 
-        # Advantage = Q(s,a) - Baseline — detach Q khỏi đồ thị Critic
-        # để gradient Actor không chạy ngược vào Critic weights.
-        advantage: Tensor = q_values.detach() - baseline.detach()  # (T, n_agents)
+            # 1. Critic tính Q-values
+            q_t, h_critic_new = self.critic(state_t, action_onehot_t, h_critic)
+            
+            # 2. Actor tính Probs
+            probs_t, h_actor_new = self.actor(obs_t, h_actor)
+            probs_t = probs_t.view(num_envs, self.n_agents, self.n_actions)
 
-        # ── BƯỚC 2: TD-target (no_grad) dùng o_{t+1} — Bước 14 algo_logic ──
-        # QUAN TRỌNG: Phải dùng next_obses (o_{t+1}), KHÔNG phải obses (o_t).
-        # Theo Bước 14: δ = r + γ·Q(s', π(o_{t+1})) - Q(s, a)
-        with torch.no_grad():
-            next_probs: Tensor    = self.actor(
-                next_obses.view(-1, next_obses.shape[-1])   # dùng o_{t+1}
-            ).view(batch_size, self.n_agents, self.n_actions)
-            next_actions: Tensor  = next_probs.argmax(dim=-1)
-            next_joint_onehot: Tensor = F.one_hot(next_actions, self.n_actions).float()
-            next_q_values: Tensor = self.critic(next_states, next_joint_onehot)  # (T, n_agents)
+            # 3. Counterfactual Baseline
+            baseline_t = torch.zeros_like(q_t)
+            with torch.no_grad():
+                for i in range(self.n_agents):
+                    for a in range(self.n_actions):
+                        temp_joint_onehot = action_onehot_t.clone()
+                        temp_joint_onehot[:, i, :] = 0
+                        temp_joint_onehot[:, i, a] = 1.0
+                        q_temp, _ = self.critic(state_t, temp_joint_onehot, h_critic)
+                        baseline_t[:, i] += probs_t[:, i, a].detach() * q_temp[:, i].detach()
 
-        td_target: Tensor = rewards + self.gamma * next_q_values * (1 - dones)  # (T, n_agents)
+            # 4. TD-Target (Next Q-values)
+            next_obs_t = next_obses[t].view(-1, next_obses.shape[-1])
+            next_state_t = next_states[t]
+            with torch.no_grad():
+                next_probs_t, h_actor_next_new = self.actor(next_obs_t, h_actor_next)
+                next_probs_t = next_probs_t.view(num_envs, self.n_agents, self.n_actions)
+                next_actions_t = next_probs_t.argmax(dim=-1)
+                next_joint_onehot = F.one_hot(next_actions_t, self.n_actions).float()
+                next_q_t, h_critic_next_new = self.critic(next_state_t, next_joint_onehot, h_critic_next)
 
-        # ── BƯỚC 3: Cập nhật Critic ─────────────────────────────────────────
-        # [MODULE 1 - FIX 2]: reduction='none' → loss shape (T, n_agents)
-        # giữ nguyên hàm giá trị Q cá thể hóa theo Trường Năng lượng.
-        # Chỉ mean theo chiều batch (dim=0), KHÔNG san bằng toàn bộ.
-        critic_loss_per_agent: Tensor = F.mse_loss(
-            q_values, td_target.detach(), reduction='none'
-        )                                                     # (T, n_agents)
-        # Lọc loss bằng active_mask
-        critic_loss: Tensor = (critic_loss_per_agent * active_masks).sum() / (active_masks.sum() + 1e-8)
+            q_values_list.append(q_t)
+            baseline_list.append(baseline_t)
+            next_q_values_list.append(next_q_t)
+            probs_list.append(probs_t)
+
+            h_actor = h_actor_new
+            h_critic = h_critic_new
+            h_actor_next = h_actor_next_new
+            h_critic_next = h_critic_next_new
+
+        q_values = torch.stack(q_values_list, dim=0)          # (T, num_envs, n_agents)
+        baseline = torch.stack(baseline_list, dim=0)
+        next_q_values = torch.stack(next_q_values_list, dim=0)
+        probs = torch.stack(probs_list, dim=0)                # (T, num_envs, n_agents, n_actions)
+
+        # Advantage = Q - Baseline
+        advantage = q_values.detach() - baseline.detach()
+
+        # TD Target
+        td_target = rewards + self.gamma * next_q_values * (1 - dones.expand_as(next_q_values))
+
+        # ── Cập nhật Critic ─────────────────────────────────────────
+        critic_loss_per_agent = F.mse_loss(q_values, td_target.detach(), reduction='none')
+        critic_loss = (critic_loss_per_agent * active_masks).sum() / (active_masks.sum() + 1e-8)
         self.critic_optimizer.zero_grad()
-        critic_loss.backward()
+        critic_loss.backward(retain_graph=True) 
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
         self.critic_optimizer.step()
 
-        # ── BƯỚC 4: Cập nhật Actor (dùng advantage đã tính từ Critic CŨ) ───
-        # Tính lại probs để có gradient flow cho Actor
-        probs: Tensor = self.actor(
-            obses.view(-1, obses.shape[-1])
-        ).view(batch_size, self.n_agents, self.n_actions)     # (T, n_agents, n_actions)
+        # ── Cập nhật Actor ─────────────────────────────────────────
+        dist_actor = torch.distributions.Categorical(probs)
+        log_probs = dist_actor.log_prob(actions)
+        entropy_bonus = dist_actor.entropy()
+        beta_entropy = 0.01
 
-        dist_actor  = torch.distributions.Categorical(probs)
-        log_probs: Tensor  = dist_actor.log_prob(actions)     # (T, n_agents)
-
-        # [FIX] Entropy regularization: ngăn Policy Collapse (chỉ chọn 1 hướng)
-        # H = -Σ p*log(p) — entropy cao = khám phá nhiều hướng hơn.
-        # β_entropy điều chỉnh mức độ khám phá: 0.005 — 0.01 là khoảng tốt cho MARL.
-        entropy_bonus: Tensor = dist_actor.entropy()          # (T, n_agents)
-        beta_entropy:  float  = 0.01
-
-        # mean() theo batch+agent để tổng hợp gradient — advantage per-agent
-        # đã được bảo toàn từ bước tính riêng rẽ ở trên. Lọc bằng active_mask!
-        actor_loss: Tensor = - ((log_probs * advantage + beta_entropy * entropy_bonus) * active_masks).sum() / (active_masks.sum() + 1e-8)
+        actor_loss = - ((log_probs * advantage + beta_entropy * entropy_bonus) * active_masks).sum() / (active_masks.sum() + 1e-8)
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)  # [FIX] Gradient clipping
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
         self.actor_optimizer.step()
 
-        # ── BƯỚC 5: Giải phóng buffer (Memory Leak Guard) ───────────────────
-        # [MODULE 1 - FIX 3]: buffer.clear() luôn được gọi cuối update()
-        # để giải phóng RAM sau mỗi episode, tránh tích lũy transitions cũ.
         buffer.clear()
 
     def save_model(self, filepath: str, episode: int) -> None:
@@ -188,7 +202,7 @@ class HES_COMA_Agent:
             "critic_state_dict": self.critic.state_dict(),
             "config": {
                 "state_dim":  self.critic.input_dim - (self.n_actions * self.n_agents),
-                "obs_dim":    self.actor.net[0].in_features,
+                "obs_dim":    self.actor.fc1.in_features,
                 "n_actions":  self.n_actions,
                 "n_agents":   self.n_agents,
             },

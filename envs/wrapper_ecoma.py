@@ -255,7 +255,7 @@ class ECOMA_Wrapper(gym.Wrapper):
         return state, obses
     
     def step(self, actions):
-        ENV_SCALE:         float = 1.0
+        ENV_SCALE:         float = 1.0 / self.num_agents
         ENERGY_SCALE:    float = 0.05
         PASSING_REWARD:    float =  0.5   # Kicker tạt bóng thành công
         ASSIST_REWARD:     float =  1.0   # Kiến tạo dẫn đến bàn thắng
@@ -267,8 +267,8 @@ class ECOMA_Wrapper(gym.Wrapper):
         # ── Cơ chế ưu tiên sút trong vòng cấm ────────────────────────────────
         BOX_X_THRESHOLD:   float =  0.83  # GRF pitch x ∈ [-1, 1]
         BOX_Y_THRESHOLD:   float =  0.20  # GRF pitch |y| ∈ [0, 0.42]
-        SHOT_IN_BOX_R:     float =  2.0   
-        PASS_IN_BOX_P:     float = -1.5  
+        SHOT_IN_BOX_R:     float =  1.5   
+        PASS_IN_BOX_P:     float = -0.8  
         # ── Cơ chế đánh giá đường chuyền của Kicker ──────────────────────────
         DANGER_ZONE_X:       float =  0.75
         DANGER_ZONE_Y:       float =  0.35
@@ -384,7 +384,7 @@ class ECOMA_Wrapper(gym.Wrapper):
             ball_init: NDArray[np.float32] = np.array(last_obs["ball"][:2])
             sign: float = 1.0 if ball_init[0] > 0 else -1.0
 
-            # Vùng chiến thuật (theo phân tích §1.4 Reward_logic.md)
+            # Vùng chiến thuật 
             near_post_zone:    NDArray[np.float32] = np.array([sign * 0.9,  ball_init[1] * 0.1])
             far_post_zone:     NDArray[np.float32] = np.array([sign * 0.9, -ball_init[1] * 0.1])
             penalty_spot_zone: NDArray[np.float32] = np.array([sign * 0.8,  0.0])

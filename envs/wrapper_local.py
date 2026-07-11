@@ -418,8 +418,8 @@ class GFootballLocalWrapper(gym.Wrapper):
         # ── Role 2: Cầu thủ trong vòng cấm khi nhận bóng → DỨT ĐIỂM ────────────
         BOX_X_THRESHOLD:   float =  0.83
         BOX_Y_THRESHOLD:   float =  0.20
-        SHOT_IN_BOX_R:     float =  5.0    # Thưởng rất lọn khi dứt điểm trong vòng cấm
-        PASS_IN_BOX_P:     float = -5.0    # Phạt nặng khi bỏ qua cơ hội sút
+        SHOT_IN_BOX_R:     float =  1.5    # Thưởng rất lọn khi dứt điểm trong vòng cấm
+        PASS_IN_BOX_P:     float = -0.8    # Phạt nặng khi bỏ qua cơ hội sút
         # Role-based (positioning bonus khi góp phần vào bàn thắng)
         ROLE_NEAR_POST:    float =  1.0
         ROLE_FAR_POST:     float =  1.0
